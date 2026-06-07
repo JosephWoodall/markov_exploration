@@ -26,11 +26,14 @@ def normalize(seq: list[float]) -> list[float]:
 
 
 def run(name: str, seq: list, sim_fn, context_length: int = 3,
-        learning_rate: float = 0.1, vigilance: float = 0.3) -> None:
+        learning_rate: float = 0.1, vigilance: float = 0.3,
+        predictor_cls=None) -> None:
+    if predictor_cls is None:
+        predictor_cls = UniversalPredictor
     n       = len(seq)
     train_n = int(n * 0.8)
 
-    predictor = UniversalPredictor(
+    predictor = predictor_cls(
         context_length, sim_fn,
         learning_rate=learning_rate,
         vigilance=vigilance,
