@@ -91,9 +91,13 @@ class UniversalPredictor:
 
     def _compute_sim(self, ctx_a: Sequence, ctx_b: Sequence) -> float:
         """
-        Successor-distribution similarity with surface-similarity cold-start.
-        Uses Bhattacharyya coefficient between empirical successor distributions.
-        Falls back to surface_sim until both contexts have min_succ_obs observations.
+        Weighted blend of successor-distribution similarity and surface similarity.
+
+        w = f(n_a) * f(n_b)  where  f(n) = n / (n + prior)
+
+        At zero observations: w=0, pure surface (the prior).
+        As evidence accumulates: w→1, pure distribution (the posterior).
+        Product form ensures we only trust the blend when both sides have evidence.
         """
         key_a, key_b = tuple(ctx_a), tuple(ctx_b)
         dist_a = self._successor_dist.get(key_a, {})
@@ -101,17 +105,20 @@ class UniversalPredictor:
         n_a = sum(dist_a.values())
         n_b = sum(dist_b.values())
 
-        if n_a >= self._min_succ_obs and n_b >= self._min_succ_obs:
+        prior = self._min_succ_obs
+        w = (n_a / (n_a + prior)) * (n_b / (n_b + prior))
+
+        dist_sim = 0.0
+        if n_a > 0 and n_b > 0:
             vocab = set(dist_a) | set(dist_b)
-            bc = sum(
+            dist_sim = sum(
                 math.sqrt((dist_a.get(v, 0) / n_a) * (dist_b.get(v, 0) / n_b))
                 for v in vocab
             )
-            return float(bc)
 
-        if self._surface_sim is not None:
-            return self._surface_sim(ctx_a, ctx_b)
-        return 0.0
+        surface_sim = self._surface_sim(ctx_a, ctx_b) if self._surface_sim is not None else 0.0
+
+        return (1.0 - w) * surface_sim + w * dist_sim
 
     def predict(self) -> tuple[Any, float]:
         if len(self.history) < self.k:
