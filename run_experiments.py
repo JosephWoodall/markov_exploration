@@ -1,0 +1,135 @@
+import statistics
+
+from predictor import UniversalPredictor
+from similarity import gaussian, hamming
+from datasets import (
+    load_airline_passengers,
+    load_gutenberg_text,
+    load_dna_sequence,
+    load_weather_events,
+    random_integers,
+)
+
+LOOKAHEAD_STEPS = 200
+
+
+def discretize(seq: list[float], n_bins: int = 8) -> list[int]:
+    lo, hi = min(seq), max(seq)
+    width  = (hi - lo) / n_bins
+    return [min(int((v - lo) / width), n_bins - 1) for v in seq]
+
+
+def normalize(seq: list[float]) -> list[float]:
+    mu    = statistics.mean(seq)
+    sigma = statistics.stdev(seq) or 1.0
+    return [(v - mu) / sigma for v in seq]
+
+
+def run(name: str, seq: list, sim_fn, context_length: int = 3,
+        learning_rate: float = 0.1, vigilance: float = 0.3) -> None:
+    n       = len(seq)
+    train_n = int(n * 0.8)
+
+    predictor = UniversalPredictor(
+        context_length, sim_fn,
+        learning_rate=learning_rate,
+        vigilance=vigilance,
+    )
+
+    # Training — order: predict → observe → feedback
+    for i, v in enumerate(seq[:train_n]):
+        if i >= context_length:
+            predictor.predict()
+        predictor.observe(v)
+        if i >= context_length:
+            predictor.feedback(v)
+
+    # Evaluation
+    correct = total = 0
+    conf_total = 0.0
+
+    for v in seq[train_n:]:
+        pred, conf = predictor.predict()
+        predictor.observe(v)
+        predictor.feedback(v)
+        if pred is not None:
+            correct    += int(pred == v)
+            conf_total += conf
+            total      += 1
+
+    unique    = len(set(seq))
+    baseline  = 1.0 / unique
+    accuracy  = correct / total if total > 0 else 0.0
+    avg_conf  = conf_total / total if total > 0 else 0.0
+    lift      = (accuracy / baseline - 1.0) * 100.0 if baseline > 0 else 0.0
+
+    cs  = predictor.convergence_state()
+    ns  = predictor.node_stats()
+    lah = predictor.lookahead_quality(LOOKAHEAD_STEPS)
+
+    print(f"\n{'─'*62}")
+    print(f"  {name}")
+    print(f"  Obs: {n}  |  Unique: {unique}  |  k={context_length}  |  ρ={vigilance}")
+    print(f"  Baseline : {baseline:.3f}")
+    print(f"  Accuracy : {accuracy:.3f}   Lift: {lift:+.1f}%")
+    print(f"  Avg conf : {avg_conf:.3f}   Quality: {cs['quality_now']:.3f}")
+    print(f"  ── Topology ─────────────────────────────────────────")
+    print(f"  Nodes total   : {ns['total_nodes']}"
+          f"  (obs {ns['observed']} · explore {ns['exploration']} · correct {ns['correction']})")
+    print(f"  Coupling links: {ns['coupling_links']}"
+          f"  mean {ns['mean_coupling']:.4f}  max {ns['max_coupling']:.4f}")
+    print(f"  λ (learned)   : {ns['lambda']:.3f}")
+    print(f"  ── Convergence ──────────────────────────────────────")
+    if cs['plateau'] is not None:
+        print(f"  Plateau L     : {cs['plateau']:.3f}")
+        print(f"  Time const τ  : {cs['tau']:.1f} obs")
+        steps = cs['steps_to_95pct']
+        status = 'converged' if steps == 0 else f'~{steps} steps remaining'
+        print(f"  Status        : {status}")
+        print(f"  Lookahead +{LOOKAHEAD_STEPS}  : {lah:.3f}")
+    else:
+        print(f"  Not enough history to fit convergence curve yet.")
+
+
+def main() -> None:
+    print("Universal Sequence Predictor — Experiment Suite")
+    print("Dynamic topology: nodes grow with problem complexity, not just data volume\n")
+
+    print("[1/5] Airline passengers (numeric time series)...")
+    raw = load_airline_passengers()
+    seq = discretize(normalize(raw), n_bins=8)
+    run("Airline Passengers", seq, gaussian(sigma=2.0), context_length=4)
+
+    print("\n[2/5] Alice in Wonderland (character-level text)...")
+    try:
+        seq = load_gutenberg_text(n_chars=1500)
+        run("Alice in Wonderland", seq, hamming, context_length=3)
+    except Exception as exc:
+        print(f"  Failed: {exc}")
+
+    print("\n[3/5] Bacteriophage lambda genome (DNA)...")
+    try:
+        seq = load_dna_sequence(n_bases=1500)
+        run("Bacteriophage Lambda DNA", seq, hamming, context_length=4)
+    except Exception as exc:
+        print(f"  Failed: {exc}")
+
+    print("\n[4/5] NYC daily weather codes (categorical events)...")
+    try:
+        seq = load_weather_events(n_days=500)
+        run("NYC Weather Events", seq, hamming, context_length=3)
+    except Exception as exc:
+        print(f"  Failed: {exc}")
+
+    print("\n[5/5] Python PRNG (unpredictable baseline)...")
+    seq = random_integers(n=500, low=0, high=9)
+    run("Python PRNG (random)", seq, gaussian(sigma=1.0), context_length=3)
+
+    print(f"\n{'═'*62}")
+    print("Exploration nodes  → created when context was novel (low coverage)")
+    print("Correction nodes   → created when system was confident but wrong")
+    print("PRNG should show   → minimal extra nodes, λ drifting toward 0\n")
+
+
+if __name__ == "__main__":
+    main()
