@@ -286,3 +286,61 @@ The single deepest difference: **in a neural network, the architecture is the mo
 | `run_forest.py` | Five-dataset experiment suite (forest) |
 | `tests.py` | Architecture-specific test suite (calibration, coupling gain, hypothesis quality, Gini, node efficiency) |
 | `animation.py` | Visual animation of the algorithm in action |
+| `test_forest.py` | Forest-specific architectural tests (grow/prune mechanisms, regression, adaptive voting) |
+
+---
+
+## Current Issue — Similarity Generalization
+
+**Status:** partially resolved (2026-06-07)
+
+### What the similarity function actually is
+
+`similarity_fn` is a **cold-start prior** — it tells the system which contexts to treat as similar before enough data exists to judge by outcomes.
+The architecture already has a domain-agnostic similarity inside `_compute_sim`: two contexts are similar if they lead to the same outcomes (Bhattacharyya coefficient on successor distributions).
+As evidence accumulates the blend weight `w → 1` and the distributional similarity takes over regardless of what `similarity_fn` does.
+
+The only question is what happens during cold start (sparse data).
+
+### The cold-start fix
+
+`similarity_fn=None` previously fell back to `0.0` — no signal, no predictions.
+Changed to **exact-match** (`1.0` if contexts are identical, `0.0` otherwise):
+at cold start the system acts as a pure n-gram lookup; as distributions build it generalises automatically.
+
+### Experiment results (forest, adaptive voting)
+
+| Dataset | Baseline | Hamming / Gaussian | sim=None | PPMI embed |
+|---|---|---|---|---|
+| Airline Passengers | 12.5% | +121% | **+203%** | +66% |
+| Alice in Wonderland | 4.0% | **+208%** | -8% | +8% |
+| DNA | 25.0% | +15% | +15% | **+21%** |
+| Weather | 33.3% | +38% | **+44%** | +41% |
+| PRNG (noise floor) | 10.0% | ~0% | ~0% | ~0% |
+
+### What the results mean
+
+**`sim=None` wins on structured, repeating data (Airline, Weather).**
+Seasonal patterns repeat across years — the exact-match prior fires correctly, distributions build quickly, and the distributional similarity does the rest.
+No domain knowledge needed.
+
+**Hamming wins on text by a large margin.**
+Character overlap is a genuinely useful signal for English: contexts sharing a common prefix ("th_") really do have similar successors.
+PPMI embeddings give only a modest improvement over exact-match because character co-occurrence at window=3 captures which characters appear *near* each other, not which contexts are *substitutable* — the distinction that matters for prediction.
+
+**PPMI embeddings improve DNA.**
+Nucleotide co-occurrence within a small window captures real biological structure (base-pairing patterns, codon statistics).
+With only 4 symbols, PPMI vectors are compact and informative.
+
+### The remaining gap for text
+
+The meaningful unit in English is the word or subword, not the individual character.
+"the" and "a" are similar contexts not because they share characters but because they both precede nouns.
+Detecting this requires either:
+- **More data**: with millions of characters, the distributional similarity learns word-level patterns on its own
+- **Pre-trained word/subword embeddings** (GloVe, FastText, BPE): transfer learned similarity from a large corpus; use as the cold-start prior here
+- **Larger sequence units**: tokenise at the word level before feeding to the predictor
+
+This is the same bottleneck that motivated Word2Vec (2013) and BERT (2018) in neural NLP.
+Those models did not escape the data-scale problem — they solved it by training on billions of tokens and letting gradient descent learn the embedding jointly with the task.
+This architecture separates the two steps (embed first, predict second), which is more interpretable but requires the embedding to be good independently.

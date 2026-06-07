@@ -8,29 +8,41 @@ from predictor import UniversalPredictor
 
 class PredictorForest:
     """
-    A forest of UniversalPredictor instances that start identical and diverge
-    through four mechanisms:
+    A forest of UniversalPredictor instances that diverge through:
+      1. Heterogeneous k       — tree i uses context_length + i
+      2. Feedback dropout      — each tree independently skips learning steps
+      3. Staggered offsets     — tree i defers learning for i * stagger steps
+      4. Inter-tree credibility — trees weighted by recent track record
 
-      1. Heterogeneous k       — tree i uses context_length + i, so each tree
-                                 specialises in a different temporal scale.
-      2. Feedback dropout      — each tree independently skips some learning steps,
-                                 causing different topologies to grow from the same data.
-      3. Staggered offsets     — tree i starts learning after i * stagger steps,
-                                 so each tree builds its early topology from a
-                                 different slice of the sequence.
-      4. Inter-tree credibility — each tree earns a persistent weight based on its
-                                 track record. Trees that have been right recently
-                                 speak louder in the vote.
+    Dynamic sizing
+    --------------
+    auto_grow  — spawn a new tree (k = current_max_k + 1) after grow_threshold
+                 consecutive steps of unanimous correlated failure across all
+                 active trees (all active trees predicted the same wrong answer).
+                 Capped at max_trees.
 
-    At prediction time two voting modes are available:
+    auto_prune — deactivate a tree after its inter-tree credibility stays below
+                 prune_floor × mean_active_credibility for prune_window consecutive
+                 steps.  At least 2 active trees are always preserved.
 
-      mixture  — confidence-weighted sum of distributions (soft, inclusive)
-      product  — weighted geometric mean of distributions (selective: an outcome
-                 wins only when most trees agree on it; disagreement collapses to
-                 uncertainty, which is correct behaviour on random data)
+    Voting modes
+    ------------
+    'mixture'  — confidence × credibility weighted sum of distributions
+    'product'  — weighted geometric mean (agreement required to win)
+    'adaptive' — α·product + (1-α)·mixture where α = mean confidence of active
+                 trees.  Automatically selects product when trees are certain,
+                 mixture when uncertain.  Default.
 
-    The public interface matches UniversalPredictor exactly — it is a drop-in
-    replacement anywhere a single predictor is used.
+    Task types
+    ----------
+    'sequence' / 'classification'
+                 Predict the most probable next successor (argmax of blended
+                 distribution).  Default.
+    'regression'
+                 Successors are numeric.  predict() returns the credibility-
+                 weighted mean of the blended successor distribution together
+                 with a peakedness-based confidence.  Useful for discretised
+                 numeric series where you want a continuous-valued output.
     """
 
     def __init__(
@@ -46,18 +58,40 @@ class PredictorForest:
         n_trees: int = 5,
         dropout: float = 0.2,
         seed: int = 42,
-        voting: str = 'product',        # 'product' | 'mixture'
-        heterogeneous_k: bool = True,   # tree i uses context_length + i
-        stagger: int = 0,               # tree i defers learning for i * stagger steps
-        tree_lr: float = 0.1,           # learning rate for inter-tree credibility
+        voting: str = 'adaptive',
+        heterogeneous_k: bool = True,
+        stagger: int = 0,
+        tree_lr: float = 0.1,
+        max_trees: int = 20,
+        auto_grow: bool = True,
+        auto_prune: bool = True,
+        prune_floor: float = 0.15,
+        prune_window: int = 50,
+        grow_threshold: int = 8,
+        task: str = 'sequence',
     ):
-        self.n        = n_trees
-        self.dropout  = dropout
-        self.voting   = voting
-        self.tree_lr  = tree_lr
+        self.dropout        = dropout
+        self.voting         = voting
+        self.tree_lr        = tree_lr
+        self.task           = task
+        self.max_trees      = max_trees
+        self.auto_grow      = auto_grow
+        self.auto_prune     = auto_prune
+        self.prune_floor    = prune_floor
+        self.prune_window   = prune_window
+        self.grow_threshold = grow_threshold
 
-        master_rng = random.Random(seed)
-        self._rngs  = [random.Random(master_rng.randint(0, 2**32)) for _ in range(n_trees)]
+        # Stored for spawning new trees
+        self._base_k   = context_length
+        self._sim_fn   = similarity_fn
+        self._lr       = learning_rate
+        self._coup_lr  = coupling_lr
+        self._fb_str   = feedback_strength
+        self._vig      = vigilance
+        self._min_k    = min_context_length
+        self._coup_ema = coupling_ema
+
+        self._master_rng = random.Random(seed)
 
         k_values = (
             [context_length + i for i in range(n_trees)]
@@ -65,29 +99,37 @@ class PredictorForest:
             else [context_length] * n_trees
         )
 
-        self.trees = [
+        self.trees: list[UniversalPredictor] = [
             UniversalPredictor(
-                k_values[i],
-                similarity_fn,
-                learning_rate=learning_rate,
-                coupling_lr=coupling_lr,
-                feedback_strength=feedback_strength,
-                vigilance=vigilance,
-                min_context_length=min_context_length,
-                coupling_ema=coupling_ema,
+                k_values[i], similarity_fn,
+                learning_rate=learning_rate, coupling_lr=coupling_lr,
+                feedback_strength=feedback_strength, vigilance=vigilance,
+                min_context_length=min_context_length, coupling_ema=coupling_ema,
             )
             for i in range(n_trees)
         ]
 
-        self._offsets    = [i * stagger for i in range(n_trees)]
-        self._steps      = [0] * n_trees
-        self._tree_creds = [1.0] * n_trees          # inter-tree credibility weights
-        self._last_preds: list[Any] = [None] * n_trees
+        n = n_trees
+        self._rngs:       list[random.Random] = [random.Random(self._master_rng.randint(0, 2**32)) for _ in range(n)]
+        self._offsets:    list[int]           = [i * stagger for i in range(n)]
+        self._steps:      list[int]           = [0] * n
+        self._tree_creds: list[float]         = [1.0] * n
+        self._last_preds: list[Any]           = [None] * n
+        self._prune_ctrs: list[int]           = [0] * n
 
-    # ── helpers ───────────────────────────────────────────────────────────────
+        self._inactive:      set[int] = set()
+        self._corr_fail_str: int      = 0
+        self._n_spawned:     int      = 0
+
+    # ── active subset ─────────────────────────────────────────────────────────
+
+    @property
+    def _active(self) -> list[int]:
+        return [i for i in range(len(self.trees)) if i not in self._inactive]
+
+    # ── distribution helpers ──────────────────────────────────────────────────
 
     def _tree_dist(self, tree: UniversalPredictor) -> dict[Any, float]:
-        """Reconstruct normalised successor distribution from last predict() call."""
         contrib = tree._last_contributions
         if not contrib:
             return {}
@@ -97,136 +139,263 @@ class PredictorForest:
             d[succ] += w / total
         return dict(d)
 
-    def _mixture_vote(
+    def _mixture_dist(
         self,
         dists: list[dict[Any, float]],
         confs: list[float],
-    ) -> tuple[Any, float]:
-        """Confidence × credibility weighted sum across all trees."""
-        votes: dict[Any, float] = defaultdict(float)
-        total_w = sum(
-            confs[i] * self._tree_creds[i]
-            for i in range(self.n)
-            if confs[i] > 0
-        )
-        if total_w < 1e-12:
-            return None, 0.0
-        for i, (d, c) in enumerate(zip(dists, confs)):
+        creds: list[float],
+    ) -> dict[Any, float]:
+        """Confidence × credibility weighted sum of distributions."""
+        total_w = sum(c * cr for c, cr in zip(confs, creds) if c > 0) or 1e-12
+        result: dict[Any, float] = defaultdict(float)
+        for d, c, cr in zip(dists, confs, creds):
             if c > 0 and d:
-                w = c * self._tree_creds[i] / total_w
+                w = c * cr / total_w
                 for v, p in d.items():
-                    votes[v] += w * p
-        if not votes:
-            return None, 0.0
-        best = max(votes, key=votes.get)
-        return best, float(votes[best])
+                    result[v] += w * p
+        return dict(result)
 
-    def _product_vote(
+    def _product_dist(
         self,
         dists: list[dict[Any, float]],
         confs: list[float],
-    ) -> tuple[Any, float]:
-        """
-        Weighted geometric mean of distributions.
-
-        An outcome wins only when most trees agree on it.  Disagreement
-        collapses to near-uniform → correctly low confidence on random data.
-        Falls back to mixture if the product degenerates.
-        """
-        active = [
-            (dists[i], self._tree_creds[i])
-            for i in range(self.n)
-            if confs[i] > 0 and dists[i]
-        ]
-        if not active:
-            return None, 0.0
-
-        vocab      = set().union(*(d.keys() for d, _ in active))
-        total_cred = sum(cred for _, cred in active) or 1e-12
-
+        creds: list[float],
+    ) -> dict[Any, float]:
+        """Weighted geometric mean of distributions."""
+        active_pairs = [(d, cr) for d, c, cr in zip(dists, confs, creds) if c > 0 and d]
+        if not active_pairs:
+            return {}
+        vocab      = set().union(*(d.keys() for d, _ in active_pairs))
+        total_cred = sum(cr for _, cr in active_pairs) or 1e-12
         product: dict[Any, float] = {}
         for v in vocab:
             log_p = sum(
-                (cred / total_cred) * math.log(max(d.get(v, 1e-10), 1e-10))
-                for d, cred in active
+                (cr / total_cred) * math.log(max(d.get(v, 1e-10), 1e-10))
+                for d, cr in active_pairs
             )
             product[v] = math.exp(log_p)
-
         total = sum(product.values())
         if total < 1e-12:
-            return self._mixture_vote(dists, confs)
+            return {}
+        return {v: p / total for v, p in product.items()}
 
-        normed = {v: p / total for v, p in product.items()}
-        best   = max(normed, key=normed.get)
-        return best, float(normed[best])
+    def _adaptive_dist(
+        self,
+        dists: list[dict[Any, float]],
+        confs: list[float],
+        creds: list[float],
+    ) -> dict[Any, float]:
+        """
+        α·product + (1-α)·mixture where α = mean confidence.
+
+        High confidence → product (agreement required to win).
+        Low confidence  → mixture (pool uncertain signals).
+        """
+        alpha = sum(c for c in confs if c > 0) / (len(confs) or 1)
+        mix  = self._mixture_dist(dists, confs, creds)
+        prod = self._product_dist(dists, confs, creds)
+        if not prod:
+            return mix
+        if not mix:
+            return prod
+        vocab   = set(mix) | set(prod)
+        blended = {v: alpha * prod.get(v, 0.0) + (1.0 - alpha) * mix.get(v, 0.0)
+                   for v in vocab}
+        total   = sum(blended.values())
+        if total < 1e-12:
+            return mix
+        return {v: p / total for v, p in blended.items()}
+
+    def _dist_to_prediction(self, dist: dict[Any, float]) -> tuple[Any, float]:
+        """
+        Convert a blended distribution to a prediction.
+
+        sequence/classification — argmax + peak probability as confidence
+        regression              — weighted mean + peakedness as confidence
+        """
+        if not dist:
+            return None, 0.0
+
+        if self.task == 'regression':
+            try:
+                prediction = sum(float(v) * p for v, p in dist.items())
+                n_vals = len(dist)
+                if n_vals > 1:
+                    entropy = -sum(p * math.log(p + 1e-12) for p in dist.values())
+                    conf    = 1.0 - entropy / math.log(n_vals)
+                else:
+                    conf = 1.0
+                return prediction, max(0.0, conf)
+            except (TypeError, ValueError):
+                pass   # non-numeric successors: fall through to argmax
+
+        best = max(dist, key=dist.get)
+        return best, float(dist[best])
 
     # ── public interface ──────────────────────────────────────────────────────
 
     def observe(self, value: Any) -> None:
-        for tree in self.trees:
-            tree.observe(value)
+        for i, tree in enumerate(self.trees):
+            if i not in self._inactive:
+                tree.observe(value)
 
     def predict(self) -> tuple[Any, float]:
-        dists: list[dict[Any, float]] = []
-        confs: list[float]            = []
+        active  = self._active
+        n_total = len(self.trees)
 
-        for i, tree in enumerate(self.trees):
-            pred, conf = tree.predict()
+        dists: list[dict[Any, float]] = [{} for _ in range(n_total)]
+        confs: list[float]            = [0.0] * n_total
+
+        for i in active:
+            pred, conf = self.trees[i].predict()
             self._last_preds[i] = pred
-            dists.append(self._tree_dist(tree))
-            confs.append(conf)
+            dists[i] = self._tree_dist(self.trees[i])
+            confs[i] = conf
 
-        if self.voting == 'product':
-            return self._product_vote(dists, confs)
-        return self._mixture_vote(dists, confs)
+        active_dists = [dists[i] for i in active]
+        active_confs = [confs[i] for i in active]
+        active_creds = [self._tree_creds[i] for i in active]
+
+        if self.voting == 'mixture':
+            dist = self._mixture_dist(active_dists, active_confs, active_creds)
+        elif self.voting == 'product':
+            dist = self._product_dist(active_dists, active_confs, active_creds)
+            if not dist:
+                dist = self._mixture_dist(active_dists, active_confs, active_creds)
+        else:  # adaptive
+            dist = self._adaptive_dist(active_dists, active_confs, active_creds)
+
+        return self._dist_to_prediction(dist)
 
     def feedback(self, actual: Any) -> None:
-        for i, (tree, rng) in enumerate(zip(self.trees, self._rngs)):
+        active = self._active
+
+        for i in active:
             self._steps[i] += 1
-
             if self._steps[i] <= self._offsets[i]:
-                continue                   # staggered offset: not yet active
+                continue
+            if self._rngs[i].random() < self.dropout:
+                continue
 
-            if rng.random() < self.dropout:
-                continue                   # dropout: skip this learning step
+            self.trees[i].feedback(actual)
 
-            tree.feedback(actual)
-
-            # Inter-tree credibility update
             if self._last_preds[i] is not None:
                 correct = self._last_preds[i] == actual
                 factor  = 1.0 + self.tree_lr if correct else 1.0 - self.tree_lr
                 self._tree_creds[i] = max(0.1, self._tree_creds[i] * factor)
 
-        # Normalise to prevent runaway growth
-        max_cred = max(self._tree_creds)
-        if max_cred > 5.0:
-            scale = 5.0 / max_cred
-            self._tree_creds = [c * scale for c in self._tree_creds]
+        # Normalise credibilities among active trees
+        if active:
+            max_cred = max(self._tree_creds[i] for i in active)
+            if max_cred > 5.0:
+                scale = 5.0 / max_cred
+                for i in active:
+                    self._tree_creds[i] *= scale
+
+        # Dynamic grow / prune — re-read active after potential spawn
+        if self.auto_grow and len(active) < self.max_trees:
+            self._check_grow(active, actual)
+        if self.auto_prune and len(self._active) > 2:
+            self._check_prune(self._active)
+
+    # ── dynamic sizing ────────────────────────────────────────────────────────
+
+    def _check_grow(self, active: list[int], actual: Any) -> None:
+        if not active:
+            return
+        wrong = [i for i in active
+                 if self._last_preds[i] is not None and self._last_preds[i] != actual]
+        # Unanimous correlated failure: every active tree predicted the same wrong answer
+        if (len(wrong) == len(active)
+                and len({self._last_preds[i] for i in wrong}) == 1):
+            self._corr_fail_str += 1
+            if self._corr_fail_str >= self.grow_threshold:
+                self._spawn_tree()
+                self._corr_fail_str = 0
+        else:
+            self._corr_fail_str = 0
+
+    def _check_prune(self, active: list[int]) -> None:
+        if len(active) <= 2:
+            return
+        mean_cred = sum(self._tree_creds[i] for i in active) / len(active)
+        for i in active:
+            if self._tree_creds[i] < self.prune_floor * mean_cred:
+                self._prune_ctrs[i] += 1
+                if self._prune_ctrs[i] >= self.prune_window:
+                    self._inactive.add(i)
+            else:
+                self._prune_ctrs[i] = 0
+
+    def _spawn_tree(self) -> None:
+        if len(self.trees) >= self.max_trees:
+            return
+        active = self._active
+        new_k  = (max(self.trees[i].k for i in active) + 1) if active else self._base_k + 1
+
+        self.trees.append(
+            UniversalPredictor(
+                new_k, self._sim_fn,
+                learning_rate=self._lr, coupling_lr=self._coup_lr,
+                feedback_strength=self._fb_str, vigilance=self._vig,
+                min_context_length=self._min_k, coupling_ema=self._coup_ema,
+            )
+        )
+        self._rngs.append(random.Random(self._master_rng.randint(0, 2**32)))
+        self._offsets.append(0)
+        self._steps.append(0)
+        self._tree_creds.append(1.0)
+        self._last_preds.append(None)
+        self._prune_ctrs.append(0)
+        self._n_spawned += 1
 
     # ── diagnostics ───────────────────────────────────────────────────────────
 
     def node_stats(self) -> dict:
-        all_stats = [tree.node_stats() for tree in self.trees]
+        active    = self._active
+        all_stats = [self.trees[i].node_stats() for i in active]
+        if not all_stats:
+            return {
+                'total_nodes': 0, 'observed': 0, 'exploration': 0, 'correction': 0,
+                'coupling_links': 0, 'mean_coupling': 0.0, 'max_coupling': 0.0,
+                'lambda': 0.0, 'optimizer_budget': 0, 'optimizer_rolling_acc': 0.0,
+                'allocator_trials': 0, 'n_active': 0, 'n_total': 0,
+                'n_spawned': 0, 'n_inactive': 0,
+            }
+        n_active = len(active)
         result: dict = {}
         for key in ('total_nodes', 'observed', 'exploration',
                     'correction', 'coupling_links', 'allocator_trials'):
             result[key] = sum(s[key] for s in all_stats)
         for key in ('mean_coupling', 'lambda', 'optimizer_rolling_acc'):
-            result[key] = sum(s[key] for s in all_stats) / self.n
+            result[key] = sum(s[key] for s in all_stats) / n_active
         result['max_coupling']     = max(s['max_coupling']     for s in all_stats)
-        result['optimizer_budget'] = int(sum(s['optimizer_budget'] for s in all_stats) / self.n)
+        result['optimizer_budget'] = int(sum(s['optimizer_budget'] for s in all_stats) / n_active)
+        result['n_active']         = n_active
+        result['n_total']          = len(self.trees)
+        result['n_spawned']        = self._n_spawned
+        result['n_inactive']       = len(self._inactive)
         return result
 
     def similarity_quality(self) -> float:
-        return sum(t.similarity_quality() for t in self.trees) / self.n
+        active = self._active
+        if not active:
+            return 0.0
+        return sum(self.trees[i].similarity_quality() for i in active) / len(active)
 
     def convergence_state(self) -> dict:
-        states   = [tree.convergence_state() for tree in self.trees]
+        active = self._active
+        if not active:
+            return {'plateau': None, 'tau': None, 'quality_now': 0.0,
+                    'steps_to_95pct': None, 'converged': False}
+        states    = [self.trees[i].convergence_state() for i in active]
         qualities = [s['quality_now'] for s in states]
-        median_q  = sorted(qualities)[self.n // 2]
-        idx       = min(range(self.n), key=lambda i: abs(qualities[i] - median_q))
-        return states[idx]
+        median_q  = sorted(qualities)[len(active) // 2]
+        idx_local = min(range(len(active)), key=lambda j: abs(qualities[j] - median_q))
+        return states[idx_local]
 
     def lookahead_quality(self, n_steps: int) -> float:
-        return sum(t.lookahead_quality(n_steps) for t in self.trees) / self.n
+        active = self._active
+        if not active:
+            return 0.0
+        return sum(self.trees[i].lookahead_quality(n_steps) for i in active) / len(active)

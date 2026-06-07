@@ -116,7 +116,12 @@ class UniversalPredictor:
                 for v in vocab
             )
 
-        surface_sim = self._surface_sim(ctx_a, ctx_b) if self._surface_sim is not None else 0.0
+        if self._surface_sim is not None:
+            surface_sim = self._surface_sim(ctx_a, ctx_b)
+        else:
+            # Domain-agnostic cold-start prior: identical contexts = 1, unknown pairs = 0.
+            # As evidence accumulates w→1 and distributional similarity takes over.
+            surface_sim = 1.0 if list(ctx_a) == list(ctx_b) else 0.0
 
         return (1.0 - w) * surface_sim + w * dist_sim
 

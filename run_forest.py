@@ -11,10 +11,15 @@ from datasets import (
     random_integers,
 )
 
-N_TREES  = 5
-DROPOUT  = 0.2
-STAGGER  = 25    # tree i defers learning for i*25 steps
-VOTING   = 'product'
+N_TREES        = 5
+DROPOUT        = 0.2
+STAGGER        = 25
+VOTING         = 'adaptive'
+MAX_TREES      = 20
+AUTO_GROW      = True
+AUTO_PRUNE     = True
+GROW_THRESHOLD = 8
+PRUNE_WINDOW   = 50
 
 forest_cls = functools.partial(
     PredictorForest,
@@ -24,13 +29,20 @@ forest_cls = functools.partial(
     voting=VOTING,
     heterogeneous_k=True,
     tree_lr=0.1,
+    max_trees=MAX_TREES,
+    auto_grow=AUTO_GROW,
+    auto_prune=AUTO_PRUNE,
+    grow_threshold=GROW_THRESHOLD,
+    prune_window=PRUNE_WINDOW,
 )
 
 
 def main() -> None:
     print("Universal Sequence Predictor — Forest Experiment Suite")
-    print(f"  {N_TREES} trees  |  dropout {DROPOUT}  |  stagger {STAGGER}"
-          f"  |  k heterogeneous  |  voting: {VOTING}\n")
+    print(f"  {N_TREES} initial trees  |  dropout {DROPOUT}  |  stagger {STAGGER}"
+          f"  |  k heterogeneous  |  voting: {VOTING}")
+    print(f"  Dynamic sizing: grow≤{MAX_TREES} trees  |  "
+          f"auto_grow (thresh={GROW_THRESHOLD})  |  auto_prune (window={PRUNE_WINDOW})\n")
 
     print("[1/5] Airline passengers (numeric time series)...")
     raw = load_airline_passengers()
@@ -68,9 +80,11 @@ def main() -> None:
         predictor_cls=forest_cls)
 
     print(f"\n{'═'*62}")
-    print(f"Forest config: {N_TREES} trees, k = base+0 … base+{N_TREES-1}")
+    print(f"Initial config: {N_TREES} trees, k = base+0 … base+{N_TREES-1}")
     print(f"  Dropout {DROPOUT} | Stagger {STAGGER} steps | Voting: {VOTING}")
-    print("Node counts and coupling links are summed across all trees.\n")
+    print(f"  Trees grow (max {MAX_TREES}) on unanimous wrong streak ≥ {GROW_THRESHOLD}")
+    print(f"  Trees prune after credibility below floor for {PRUNE_WINDOW} steps")
+    print("  node_stats() n_active/n_total/n_spawned show forest evolution\n")
 
 
 if __name__ == "__main__":
