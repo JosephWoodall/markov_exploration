@@ -151,6 +151,88 @@ Module 1's fixed context window means the beginning of a long question may fall 
 
 ---
 
+## What is a Node?
+
+A node is the fundamental unit of knowledge in the system — a single frozen memory. Every node stores exactly four things:
+
+| Field | What it holds | Example |
+|---|---|---|
+| **Context** | The last k observations before something happened | `['t', 'h', 'e']` |
+| **Successor** | What actually happened next | `' '` (a space) |
+| **Credibility** | How reliable this memory has proven to be | `2.4` |
+| **Type** | Why this node was created | `observed` / `exploration` / `correction` |
+
+That is the complete node. It contains no rules, no weights in the neural network sense, no abstracted features. It is a specific remembered moment: *"when I saw this exact situation, that happened next, and here is my track record since."*
+
+Nodes do not know about each other directly. The predictor holds the successor distributions (histograms of outcomes seen after each context window) and the coupling links (directed trust relationships between node pairs). Nodes are the raw anchors; the distributions and coupling are annotations built on top of them over time.
+
+### Node types and their starting credibilities
+
+| Type | Created when | Initial credibility | Purpose |
+|---|---|---|---|
+| `observed` | Every timestep | 1.0 | Normal learning from experience |
+| `exploration` | Full-scale max\_sim < ρ | 2.0 | Anchor genuinely novel territory — starts louder to immediately influence predictions |
+| `correction` | High confidence + wrong prediction | 3.0 | Override a blind spot — starts loudest because the system was confidently wrong |
+
+The higher starting credibility for exploration and correction nodes ensures they influence predictions immediately rather than having to earn trust from scratch.
+
+---
+
+## Forest Architecture (Module 1 Ensemble)
+
+A `PredictorForest` is a collection of N `UniversalPredictor` instances that start identical and diverge through experience. The key insight is the same one behind random forests: a diverse ensemble where individuals disagree is more robust than a single large predictor, because their disagreements are informative — regions of consensus signal genuine structure; regions of conflict signal uncertainty or noise.
+
+### How diversity is created — four mechanisms
+
+**1. Heterogeneous context lengths**
+
+Each tree uses a different window size: tree 0 gets `k`, tree 1 gets `k+1`, tree 2 gets `k+2`, and so on. This is the most direct implementation of the "derivative at a point" idea — different k values capture different orders of the temporal structure of the sequence. Short-k trees capture broad, fast-changing patterns. Long-k trees capture deep, slow-changing structure. The vote aggregates across all temporal scales simultaneously.
+
+**2. Feedback dropout**
+
+Each tree independently decides, with probability `dropout`, to skip the learning step for a given observation. The observation is still seen (all trees maintain the same history), but the node creation and credibility/coupling updates are skipped. Over time, each tree builds its topology from a different subset of learning events — different nodes get created first, different coupling links form, different credibility scores develop.
+
+This is the sequence analogue of bootstrap aggregating (bagging) in random forests: each tree learns from a random subset of the data.
+
+**3. Staggered offsets**
+
+Tree i does not begin learning until it has seen `i × stagger` steps. This gives each tree a different starting point: tree 0 builds its early topology from the very beginning of the sequence; tree 4 (with stagger=25) doesn't start until step 100. The early structure of a predictor's topology has an outsized influence on how it develops — nodes created first tend to accumulate credibility faster and anchor more coupling links. Staggering the start ensures genuine structural diversity rather than just stochastic variation.
+
+**4. Inter-tree credibility (adaptive weighting)**
+
+Each tree maintains a persistent credibility weight that is updated after every prediction: correct trees grow, incorrect trees shrink, by a fixed learning rate. This weight is multiplied by the per-prediction confidence when aggregating votes, so trees that have been reliably right on similar recent queries speak louder. The weights are normalised periodically to prevent runaway growth.
+
+This is the forest-level analogue of the node-level credibility mechanism inside each tree — the same principle (track record drives trust) operating at two different scales simultaneously.
+
+### Voting: mixture vs. product-of-experts
+
+**Mixture** (confidence-weighted sum): each tree contributes its full distribution, weighted by `confidence × tree_credibility`. The winning outcome accumulates the most total weight. Inclusive and smooth.
+
+**Product-of-experts** (weighted geometric mean): an outcome's score is the weighted geometric mean of its probability across all active trees. An outcome that one tree assigns near-zero probability is strongly suppressed regardless of what other trees think. This means:
+
+- On structured data where trees genuinely agree, the product sharpens the prediction
+- On random data where trees learned different noise patterns, they disagree → the product collapses toward uniform → low confidence → correct "I don't know"
+
+Product is the recommended default for general use. Mixture is better when the training data is sparse and you want every tree's signal to count even when they conflict.
+
+### Why this resembles the brain
+
+The forest architecture maps surprisingly closely onto theories of biological cognition:
+
+| Forest mechanism | Neural analogue |
+|---|---|
+| Heterogeneous k | Cortical hierarchy — each level processes different temporal scales |
+| Feedback dropout | Stochastic synaptic transmission — not every spike propagates |
+| Staggered offsets | Cortical column specialisation — columns exposed to different stimuli first develop different receptive fields |
+| Inter-tree credibility | Neuromodulatory gating — dopamine and acetylcholine selectively amplify reliable circuits |
+| Product-of-experts | Coincidence detection — a postsynaptic neuron fires only when multiple inputs agree |
+| Node credibility within each tree | Long-term potentiation and depression — synaptic strength reflects track record |
+| Node coupling within each tree | Hebbian learning — connections between nodes that fire together and are right together grow stronger |
+
+The entire architecture, from single nodes up to the forest, is built on one repeated idea: **track record drives trust, and trust drives influence.**
+
+---
+
 ## Architecture Summary
 
 | Component | What it is | What it does |
@@ -199,6 +281,8 @@ The single deepest difference: **in a neural network, the architecture is the mo
 | `components.py` | `Optimizer` and `Allocator` components |
 | `similarity.py` | Surface similarity functions used as cold-start fallback (gaussian, hamming, jaccard) |
 | `datasets.py` | Dataset loaders (airline, text, DNA, weather, PRNG) |
-| `run_experiments.py` | Full five-dataset experiment suite |
+| `forest.py` | `PredictorForest` — ensemble of predictors with heterogeneous k, dropout, staggered offsets, inter-tree credibility, and product-of-experts voting |
+| `run_experiments.py` | Five-dataset experiment suite (single predictor) |
+| `run_forest.py` | Five-dataset experiment suite (forest) |
 | `tests.py` | Architecture-specific test suite (calibration, coupling gain, hypothesis quality, Gini, node efficiency) |
 | `animation.py` | Visual animation of the algorithm in action |

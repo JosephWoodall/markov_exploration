@@ -1,7 +1,7 @@
 import functools
 
 from forest import PredictorForest
-from run_experiments import run, discretize, normalize, LOOKAHEAD_STEPS
+from run_experiments import run, discretize, normalize
 from similarity import gaussian, hamming
 from datasets import (
     load_airline_passengers,
@@ -11,15 +11,26 @@ from datasets import (
     random_integers,
 )
 
-N_TREES = 5
-DROPOUT = 0.2
+N_TREES  = 5
+DROPOUT  = 0.2
+STAGGER  = 25    # tree i defers learning for i*25 steps
+VOTING   = 'product'
 
-forest_cls = functools.partial(PredictorForest, n_trees=N_TREES, dropout=DROPOUT)
+forest_cls = functools.partial(
+    PredictorForest,
+    n_trees=N_TREES,
+    dropout=DROPOUT,
+    stagger=STAGGER,
+    voting=VOTING,
+    heterogeneous_k=True,
+    tree_lr=0.1,
+)
 
 
 def main() -> None:
-    print(f"Universal Sequence Predictor — Forest Experiment Suite")
-    print(f"Forest: {N_TREES} trees  |  dropout per tree: {DROPOUT}\n")
+    print("Universal Sequence Predictor — Forest Experiment Suite")
+    print(f"  {N_TREES} trees  |  dropout {DROPOUT}  |  stagger {STAGGER}"
+          f"  |  k heterogeneous  |  voting: {VOTING}\n")
 
     print("[1/5] Airline passengers (numeric time series)...")
     raw = load_airline_passengers()
@@ -57,9 +68,9 @@ def main() -> None:
         predictor_cls=forest_cls)
 
     print(f"\n{'═'*62}")
-    print(f"Each row: {N_TREES} trees aggregated via confidence-weighted vote.")
-    print("Node counts are summed across all trees.")
-    print("Topology diverges via independent {:.0%} feedback dropout per tree.\n".format(DROPOUT))
+    print(f"Forest config: {N_TREES} trees, k = base+0 … base+{N_TREES-1}")
+    print(f"  Dropout {DROPOUT} | Stagger {STAGGER} steps | Voting: {VOTING}")
+    print("Node counts and coupling links are summed across all trees.\n")
 
 
 if __name__ == "__main__":
