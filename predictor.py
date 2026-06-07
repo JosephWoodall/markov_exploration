@@ -40,7 +40,8 @@ class UniversalPredictor:
     ):
         self.k            = context_length
         self.min_k        = max(1, min_context_length)
-        self.sim          = similarity_fn
+        self._surface_sim = similarity_fn
+        self.sim          = self._compute_sim
         self.coupling_ema = coupling_ema
         self.lr           = learning_rate
         self.coupling_lr  = coupling_lr
@@ -76,11 +77,41 @@ class UniversalPredictor:
 
         self._quality_history: list[float] = []
 
+        # Successor distributions per context at each scale.
+        # _successor_dist[ctx_tuple][outcome] = count
+        # Used by _compute_sim; surface_sim is the cold-start fallback.
+        self._successor_dist: dict[tuple, dict] = {}
+        self._min_succ_obs = 3  # observations before trusting a distribution
+
     # ── public interface ──────────────────────────────────────────────────────
 
     def observe(self, value: Any) -> None:
         """Record a new value in the history sequence."""
         self.history.append(value)
+
+    def _compute_sim(self, ctx_a: Sequence, ctx_b: Sequence) -> float:
+        """
+        Successor-distribution similarity with surface-similarity cold-start.
+        Uses Bhattacharyya coefficient between empirical successor distributions.
+        Falls back to surface_sim until both contexts have min_succ_obs observations.
+        """
+        key_a, key_b = tuple(ctx_a), tuple(ctx_b)
+        dist_a = self._successor_dist.get(key_a, {})
+        dist_b = self._successor_dist.get(key_b, {})
+        n_a = sum(dist_a.values())
+        n_b = sum(dist_b.values())
+
+        if n_a >= self._min_succ_obs and n_b >= self._min_succ_obs:
+            vocab = set(dist_a) | set(dist_b)
+            bc = sum(
+                math.sqrt((dist_a.get(v, 0) / n_a) * (dist_b.get(v, 0) / n_b))
+                for v in vocab
+            )
+            return float(bc)
+
+        if self._surface_sim is not None:
+            return self._surface_sim(ctx_a, ctx_b)
+        return 0.0
 
     def predict(self) -> tuple[Any, float]:
         if len(self.history) < self.k:
@@ -175,6 +206,15 @@ class UniversalPredictor:
         for length in range(self.min_k, self.k + 1):
             if len(self.history) >= length:
                 self._add_node(list(self.history[-length:]), actual, 'observed')
+
+        # ── 1b. Update successor distributions at all scales ─────────────────
+        # _last_context is the context that preceded actual (set in predict()).
+        if self._last_context:
+            for length in range(self.min_k, len(self._last_context) + 1):
+                key = tuple(self._last_context[-length:])
+                if key not in self._successor_dist:
+                    self._successor_dist[key] = {}
+                self._successor_dist[key][actual] = self._successor_dist[key].get(actual, 0) + 1
 
         # ── 2. Update credibility (peer-independent) ──────────────────────────
         if self._last_contributions:
