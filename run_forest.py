@@ -53,8 +53,15 @@ def main() -> None:
     print("\n[2/5] Alice in Wonderland (character-level text)...")
     try:
         seq = load_gutenberg_text(n_chars=1500)
-        run("Alice in Wonderland", seq, hamming, context_length=3,
-            predictor_cls=forest_cls)
+        # Text at k=3 with 25-char alphabet: k=4+ contexts are too sparse (25^4 >> 1200 samples).
+        # All trees run at k=3 so diversity comes from dropout + stagger only.
+        # auto_grow disabled: spawning trees at k=4+ on this corpus would just add noise.
+        forest_text_cls = functools.partial(forest_cls, heterogeneous_k=False,
+                                            auto_grow=False, auto_prune=False)
+        # ρ=0.7: most English trigrams are rare at 1500 chars, so high vigilance
+        # is needed to trigger exploration nodes that anchor novel territory.
+        run("Alice in Wonderland", seq, hamming, context_length=3, vigilance=0.7,
+            predictor_cls=forest_text_cls)
     except Exception as exc:
         print(f"  Failed: {exc}")
 

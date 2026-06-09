@@ -167,10 +167,11 @@ class PredictorForest:
             return {}
         vocab      = set().union(*(d.keys() for d, _ in active_pairs))
         total_cred = sum(cr for _, cr in active_pairs) or 1e-12
+        floor      = 1.0 / max(len(vocab), 1)   # uniform-ignorance prior; prevents disjoint-support collapse
         product: dict[Any, float] = {}
         for v in vocab:
             log_p = sum(
-                (cr / total_cred) * math.log(max(d.get(v, 1e-10), 1e-10))
+                (cr / total_cred) * math.log(max(d.get(v, floor), floor))
                 for d, cr in active_pairs
             )
             product[v] = math.exp(log_p)

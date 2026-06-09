@@ -78,6 +78,7 @@ def _coarsen(code: int) -> str:
         return "storm"
 
 
-def random_integers(n: int = 500, low: int = 0, high: int = 9) -> list[int]:
+def random_integers(n: int = 500, low: int = 0, high: int = 9, seed: int | None = None) -> list[int]:
     """Uniformly random integers — the unpredictable baseline."""
-    return [random.randint(low, high) for _ in range(n)]
+    rng = random.Random(seed) if seed is not None else random
+    return [rng.randint(low, high) for _ in range(n)]

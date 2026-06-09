@@ -123,7 +123,11 @@ class UniversalPredictor:
             # As evidence accumulates w→1 and distributional similarity takes over.
             surface_sim = 1.0 if list(ctx_a) == list(ctx_b) else 0.0
 
-        return (1.0 - w) * surface_sim + w * dist_sim
+        # Multiplicative fusion: surface_sim is the prior on "are these contexts
+        # related?".  Distributional evidence only refines that prior — it cannot
+        # create similarity from nothing when surface_sim = 0.  This prevents
+        # noise-contaminated distributions from causing cross-context bleeding.
+        return surface_sim * ((1.0 - w) + w * dist_sim)
 
     def predict(self) -> tuple[Any, float]:
         if len(self.history) < self.k:
@@ -215,9 +219,12 @@ class UniversalPredictor:
 
     def feedback(self, actual: Any) -> None:
         # ── 1. Create observed nodes at all context lengths ───────────────────
-        for length in range(self.min_k, self.k + 1):
-            if len(self.history) >= length:
-                self._add_node(list(self.history[-length:]), actual, 'observed')
+        # Use the predict-time context (_last_context was captured before
+        # observe() appended the current value), so the node correctly
+        # encodes prior_context → actual_next_value.
+        if self._last_context:
+            for length in range(self.min_k, len(self._last_context) + 1):
+                self._add_node(list(self._last_context[-length:]), actual, 'observed')
 
         # ── 1b. Update successor distributions at all scales ─────────────────
         # _last_context is the context that preceded actual (set in predict()).
@@ -332,8 +339,13 @@ class UniversalPredictor:
             if self._last_fullscale_max_sim < self.vigilance:
                 self._add_node(self._last_context, actual, 'exploration')
 
-            # Trigger 3 — correction: system was confident but wrong
-            elif (self._last_confidence > 0.6
+            # Trigger 3 — correction: found a high-quality context match but predicted
+            # the wrong successor.  Use max_sim rather than confidence because
+            # confidence is bounded by the number of nodes — at small k with only
+            # a few initial nodes the old 0.6 confidence threshold was unreachable.
+            # Floor at 0.8 so noisy/low-vigilance settings (e.g. ρ=0.3 on PRNG)
+            # don't trigger spurious corrections on approximate matches.
+            elif (self._last_max_sim >= max(self.vigilance, 0.8)
                   and self._last_prediction is not None
                   and self._last_prediction != actual):
                 self._add_node(self._last_context, actual, 'correction')

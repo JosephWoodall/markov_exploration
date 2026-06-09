@@ -166,7 +166,7 @@ def test_adaptive_voting():
     """
     raw        = load_airline_passengers()
     structured = discretize(normalize(raw), n_bins=8)
-    rand_seq   = random_integers(n=500, low=0, high=9)
+    rand_seq   = random_integers(n=500, low=0, high=9, seed=7)
 
     results = {}
     for v in ('mixture', 'product', 'adaptive'):
