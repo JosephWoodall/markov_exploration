@@ -1,0 +1,17 @@
+\begin{table}[h]
+\centering
+\caption{Test accuracy (\%) on standard benchmarks. \textbf{Bold} = best, \underline{underline} = second best.}
+\label{tab:main_accuracy}
+\begin{tabular}{lrrrrrrr}
+\toprule
+Dataset & Persistence & Majority & N-gram(5) & PPM-D(5) & CTW(5) & Predictor & Forest \\
+\midrule
+Airline & \textbf{37.9\%} & 0.0\% & 27.6\% & 27.6\% & 31.0\% & \textbf{37.9\%} & 29.6\% \\
+Alice & 3.7\% & 18.0\% & 36.7\% & \underline{37.3\%} & \textbf{38.7\%} & 35.0\% & 34.7\% \\
+DNA & 28.7\% & 29.0\% & 30.3\% & \underline{30.7\%} & 27.3\% & \textbf{33.0\%} & 28.3\% \\
+Weather & \underline{48.0\%} & 46.0\% & 46.0\% & 46.0\% & \underline{48.0\%} & 41.0\% & \textbf{49.0\%} \\
+PRNG & 10.0\% & 11.0\% & \textbf{19.0\%} & \underline{18.0\%} & 16.0\% & 14.0\% & 13.0\% \\
+Electricity & \textbf{84.8\%} & 54.9\% & \textbf{84.8\%} & \textbf{84.8\%} & \textbf{84.8\%} & 79.0\% & 83.7\% \\
+\bottomrule
+\end{tabular}
+\end{table}

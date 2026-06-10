@@ -1,0 +1,19 @@
+\begin{table}[h]
+\centering
+\caption{Wilcoxon signed-rank test (two-tailed): Predictor and Forest vs PPM-D(5). Each paired observation is one test-step prediction (correct$=$1, wrong$=$0); $n$ is the number of test steps. $^*p{<}0.05$, $^{**}p{<}0.01$, $^{***}p{<}0.001$.}
+\label{tab:significance}
+\begin{tabular}{l r rr rr}
+\toprule
+Dataset & $n$ & \multicolumn{2}{c}{Predictor vs PPM-D} & \multicolumn{2}{c}{Forest vs PPM-D} \\
+\midrule
+ & & Acc. $\Delta$ & $p$ & Acc. $\Delta$ & $p$ \\
+\midrule
+Airline & 27 & +7.4pp$^{}$ & 0.465 & +0.0pp$^{}$ & 0.917 \\
+Alice & 300 & -2.3pp$^{}$ & 0.178 & -2.7pp$^{}$ & 0.170 \\
+DNA & 300 & +2.3pp$^{}$ & 0.468 & -2.3pp$^{}$ & 0.413 \\
+Weather & 100 & -5.0pp$^{}$ & 0.423 & +3.0pp$^{}$ & 0.631 \\
+PRNG & 100 & -4.0pp$^{}$ & 0.388 & -5.0pp$^{}$ & 0.267 \\
+Electricity & 9063 & -5.9pp$^{***}$ & 0.000 & -1.1pp$^{***}$ & 0.000 \\
+\bottomrule
+\end{tabular}
+\end{table}

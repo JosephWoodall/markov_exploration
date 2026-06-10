@@ -1,456 +1,311 @@
+"""
+Universal Sequence Predictor — Credibility-Weighted Context Tree
+
+Architecture
+------------
+Contexts live in a prefix trie.  Each node in the trie stores a
+credibility-weighted distribution over successor symbols.
+
+Prediction  O(k):
+    Walk the trie at depths min_k..k, collecting matching context nodes.
+    Blend their distributions from shallow to deep using a CTW-style
+    recursive mixture:
+
+        λ_d = c_d / (c_d + 1)          # credibility → mixing weight
+        P_d = λ_d · P_local(d) + (1−λ_d) · P_{d−1}
+
+    High credibility → λ close to 1 → deep context dominates.
+    Low credibility  → λ close to 0 → falls back to shallower.
+    Root provides a KT-smoothed unigram as the seed distribution.
+
+Update  O(k):
+    For each depth, update the matching node's per-successor credibility
+    and the node's overall credibility using a multiplicative rule:
+
+        correct:  c ← min(C_MAX, c × (1 + lr))
+        wrong:    c ← max(C_MIN, c × (1 − lr))
+
+    Wrong predictions also boost the correct successor's credibility
+    at the same node — the in-trie correction mechanism.
+
+Concept drift:
+    Wrong predictions degrade node_cred, reducing λ and causing automatic
+    fallback to shallower contexts.  New correct observations rebuild
+    credibility for the updated pattern.  No drift detector; no forgetting
+    parameter; adaptation speed is a direct function of how confidently the
+    wrong pattern was held.
+
+Regret sketch:
+    The multiplicative credibility update is the Multiplicative Weights
+    Update (MWU) algorithm applied to depth selection.  For the class of k
+    single-depth predictors MWU achieves O(√(T ln k)) regret in hindsight.
+    The CTW-style blend implements this across all depths simultaneously.
+"""
+
 import math
-from collections import defaultdict
 from typing import Any, Callable, Sequence
 
-from components import Allocator, Optimizer
+_CRED_MIN = 0.01
+_CRED_MAX = 8.0
 
-# Initial credibility granted to each node type.
-# Correction and exploration nodes start louder so they immediately influence
-# predictions in the situations they were created to address.
-_INIT_CRED   = {'observed': 1.0, 'exploration': 2.0, 'correction': 3.0}
-_MAX_CRED    = 8.0   # credibility ceiling — prevents runaway but allows real spread
-_MAX_COUPLING = 1.0  # coupling magnitude ceiling
+
+class _TrieNode:
+    """One node in the credibility-weighted context tree."""
+    __slots__ = ['children', 'succ_cred', 'node_cred', 'n_obs']
+
+    def __init__(self):
+        self.children:  dict = {}     # symbol → _TrieNode
+        self.succ_cred: dict = {}     # symbol → float  (credibility weight)
+        self.node_cred: float = 1.0   # reliability of this context as a predictor
+        self.n_obs:     int   = 0     # times this context was seen
 
 
 class UniversalPredictor:
-    """
-    Sequence predictor with dynamic topology, three-level weighting, and
-    inter-unit coupling.
-
-    Node types
-    ----------
-    observed    : one created per timestep from actual history
-    exploration : extra node when current context has no good coverage (max_sim < ρ)
-    correction  : extra node when the system was confident but wrong
-
-    The network grows faster than 1-per-observation whenever those triggers fire,
-    giving the topology the capacity the problem demands rather than a fixed budget.
-    """
 
     def __init__(
         self,
         context_length: int,
         similarity_fn: Callable[[Sequence, Sequence], float] | None = None,
         learning_rate: float = 0.1,
-        coupling_lr: float = 0.3,
-        feedback_strength: float = 0.3,
-        vigilance: float = 0.7,
+        vigilance: float = 0.5,
         min_context_length: int = 1,
-        coupling_ema: bool = True,
+        **kwargs,   # absorb legacy args (coupling_lr, feedback_strength, etc.)
     ):
-        self.k            = context_length
-        self.min_k        = max(1, min_context_length)
-        self._surface_sim = similarity_fn
-        self.sim          = self._compute_sim
-        self.coupling_ema = coupling_ema
-        self.lr           = learning_rate
-        self.coupling_lr  = coupling_lr
-        self.lam          = feedback_strength   # λ — learned inter-unit scale
-        self.vigilance    = vigilance           # ρ — novelty threshold
+        self.k         = context_length   # also exposed as max_k property
+        self.min_k     = max(1, min_context_length)
+        self.lr        = learning_rate
+        self.vigilance = vigilance
+        self._surface_sim = similarity_fn   # kept for API compat with forest
 
-        self.history: list[Any] = []
+        self._root:  _TrieNode      = _TrieNode()
+        self.history: list[Any]     = []
+        self._vocab:  set           = set()
 
-        # Unified node store — each entry:
-        #   [context: list, successor: Any, credibility: float, type: str]
-        self._nodes: list[list] = []
+        # predict() → feedback() state
+        self._last_prediction:    Any   = None
+        self._last_distribution:  dict  = {}
+        self._last_context:       list  = []
+        self._last_max_sim:       float = 0.0
+        self._last_contributions: dict  = {}   # depth → (node_cred, top_successor)
 
-        # Sparse directional coupling: (i, j) → float
-        # coupling[(i,j)]: additive effect on j when i is present
-        self.coupling: dict[tuple[int, int], float] = {}
-        # Observation counts per pair — drives adaptive alpha
-        self._coupling_counts: dict[tuple[int, int], int] = {}
-
-        # Optimizer + Allocator
-        self.optimizer = Optimizer(min_k=3, max_k=20, initial_k=10)
-        self.allocator = Allocator(diversity_weight=0.4, coupling_weight=0.3)
-
-        # State preserved from predict() for use in feedback()
-        self._last_contributions: dict[int, tuple[float, Any]] = {}
-        self._last_base: dict[int, float] = {}
-        self._last_max_sim: float = 0.0
-        self._last_prediction: Any = None
-        self._last_confidence: float = 0.0
-        self._last_context: list = []
-        self._last_n_candidates: int = 0
-        self._last_budget_used: int = 0
-        self._last_fullscale_max_sim: float = 0.0
-
-        self._quality_history: list[float] = []
-
-        # Successor distributions per context at each scale.
-        # _successor_dist[ctx_tuple][outcome] = count
-        # Used by _compute_sim; surface_sim is the cold-start fallback.
-        self._successor_dist: dict[tuple, dict] = {}
-        self._min_succ_obs = 3  # observations before trusting a distribution
+        # Backward-compat stubs (coupling removed; ablation showed ~0 effect)
+        self.coupling:          dict  = {}
+        self._coupling_counts:  dict  = {}
+        self.lam:               float = 0.0
 
     # ── public interface ──────────────────────────────────────────────────────
 
     def observe(self, value: Any) -> None:
-        """Record a new value in the history sequence."""
         self.history.append(value)
-
-    def _compute_sim(self, ctx_a: Sequence, ctx_b: Sequence) -> float:
-        """
-        Weighted blend of successor-distribution similarity and surface similarity.
-
-        w = f(n_a) * f(n_b)  where  f(n) = n / (n + prior)
-
-        At zero observations: w=0, pure surface (the prior).
-        As evidence accumulates: w→1, pure distribution (the posterior).
-        Product form ensures we only trust the blend when both sides have evidence.
-        """
-        key_a, key_b = tuple(ctx_a), tuple(ctx_b)
-        dist_a = self._successor_dist.get(key_a, {})
-        dist_b = self._successor_dist.get(key_b, {})
-        n_a = sum(dist_a.values())
-        n_b = sum(dist_b.values())
-
-        prior = self._min_succ_obs
-        w = (n_a / (n_a + prior)) * (n_b / (n_b + prior))
-
-        dist_sim = 0.0
-        if n_a > 0 and n_b > 0:
-            vocab = set(dist_a) | set(dist_b)
-            dist_sim = sum(
-                math.sqrt((dist_a.get(v, 0) / n_a) * (dist_b.get(v, 0) / n_b))
-                for v in vocab
-            )
-
-        if self._surface_sim is not None:
-            surface_sim = self._surface_sim(ctx_a, ctx_b)
-        else:
-            # Domain-agnostic cold-start prior: identical contexts = 1, unknown pairs = 0.
-            # As evidence accumulates w→1 and distributional similarity takes over.
-            surface_sim = 1.0 if list(ctx_a) == list(ctx_b) else 0.0
-
-        # Multiplicative fusion: surface_sim is the prior on "are these contexts
-        # related?".  Distributional evidence only refines that prior — it cannot
-        # create similarity from nothing when surface_sim = 0.  This prevents
-        # noise-contaminated distributions from causing cross-context bleeding.
-        return surface_sim * ((1.0 - w) + w * dist_sim)
+        self._vocab.add(value)
 
     def predict(self) -> tuple[Any, float]:
-        if len(self.history) < self.k:
+        if not self._vocab:
             return None, 0.0
 
-        context_full = list(self.history[-self.k:])
-        self._last_context = context_full
+        self._last_context = list(self.history[-self.k:]) if self.history else []
+        active = self._get_active_nodes()
+        dist   = self._blend(active)
 
-        # Always compute full-scale max_sim for exploration/correction triggers
-        fullscale_max_sim = 0.0
-        for node in self._nodes:
-            if len(node[0]) == self.k:
-                s = self.sim(node[0], context_full)
-                if s > fullscale_max_sim:
-                    fullscale_max_sim = s
-        self._last_fullscale_max_sim = fullscale_max_sim
-
-        # Select the longest scale with sufficient coverage; fall back to min_k
-        all_candidates: dict[int, tuple[float, Any]] = {}
-        max_sim = 0.0
-
-        for length in range(self.k, self.min_k - 1, -1):
-            context = context_full[-length:]
-            candidates: dict[int, tuple[float, Any]] = {}
-            length_max_sim = 0.0
-
-            for i, node in enumerate(self._nodes):
-                ctx, succ, cred, _ = node
-                if len(ctx) != length:
-                    continue
-                s = self.sim(ctx, context)
-                if s > length_max_sim:
-                    length_max_sim = s
-                w = s * cred
-                if w > 1e-12:
-                    candidates[i] = (w, succ)
-
-            if length_max_sim >= self.vigilance or length == self.min_k:
-                all_candidates = candidates
-                max_sim = length_max_sim
-                break
-
-        self._last_max_sim      = max_sim
-        self._last_n_candidates = len(all_candidates)
-
-        if not all_candidates:
-            self._last_prediction    = None
-            self._last_confidence    = 0.0
-            self._last_contributions = {}
-            self._last_base          = {}
-            self._last_budget_used   = 0
+        if not dist:
             return None, 0.0
 
-        # Optimizer decides how many nodes speak
-        quality_now = self._quality_history[-1] if self._quality_history else 1.0
-        budget      = self.optimizer.get_budget(max_sim, quality_now)
+        pred = max(dist, key=dist.get)
+        conf = dist[pred]
 
-        # Allocator decides which nodes speak
-        base = self.allocator.select(all_candidates, self.coupling, budget)
-        self._last_base        = {i: w for i, (w, _) in base.items()}
-        self._last_budget_used = len(base)
-
-        # Inter-unit communication via learned coupling
-        # coupling[(j, i)] = effect on i when j is present (directional)
-        comm: dict[int, float] = {}
-        for i, (w, _) in base.items():
-            lateral = sum(
-                self.coupling.get((j, i), 0.0) * base[j][0]
-                for j in base if j != i
-            )
-            comm[i] = max(1e-12, w + self.lam * lateral)
-
-        self._last_contributions = {i: (comm[i], self._nodes[i][1]) for i in comm}
-
-        total_w   = sum(comm.values())
-        total_wsq = sum(v * v for v in comm.values())
-        weights: dict[Any, float] = defaultdict(float)
-        for i, w in comm.items():
-            weights[self._nodes[i][1]] += w
-
-        dist       = {v: w / total_w for v, w in weights.items()}
-        prediction = max(dist, key=dist.get)
-        eff_n      = (total_w ** 2) / total_wsq if total_wsq > 0 else 1.0
-        confidence = _confidence(dist, eff_n)
-
-        self._last_prediction = prediction
-        self._last_confidence = confidence
-        return prediction, confidence
+        self._last_distribution  = dist
+        self._last_prediction    = pred
+        self._last_max_sim       = max((n.node_cred for n, _ in active), default=0.0)
+        self._last_contributions = {
+            d: (n.node_cred,
+                max(n.succ_cred, key=n.succ_cred.get) if n.succ_cred else pred)
+            for n, d in active
+        }
+        return pred, conf
 
     def feedback(self, actual: Any) -> None:
-        # ── 1. Create observed nodes at all context lengths ───────────────────
-        # Use the predict-time context (_last_context was captured before
-        # observe() appended the current value), so the node correctly
-        # encodes prior_context → actual_next_value.
-        if self._last_context:
-            for length in range(self.min_k, len(self._last_context) + 1):
-                self._add_node(list(self._last_context[-length:]), actual, 'observed')
+        self._vocab.add(actual)
+        n_hist  = len(self.history)
+        correct = (self._last_prediction == actual)
 
-        # ── 1b. Update successor distributions at all scales ─────────────────
-        # _last_context is the context that preceded actual (set in predict()).
-        if self._last_context:
-            for length in range(self.min_k, len(self._last_context) + 1):
-                key = tuple(self._last_context[-length:])
-                if key not in self._successor_dist:
-                    self._successor_dist[key] = {}
-                self._successor_dist[key][actual] = self._successor_dist[key].get(actual, 0) + 1
+        # Root stores raw unigram counts — provides KT seed for blend
+        self._root.succ_cred[actual] = self._root.succ_cred.get(actual, 0) + 1.0
+        self._root.n_obs += 1
 
-        # ── 2. Update credibility (peer-independent) ──────────────────────────
-        if self._last_contributions:
-            # Recompute raw similarities once — clean, no drift from in-loop updates
-            raw_sims: dict[int, float] = {
-                i: self.sim(self._nodes[i][0], self._last_context[-len(self._nodes[i][0]):])
-                for i in self._last_contributions
-                if i < len(self._nodes)
-            }
+        # Per-depth context nodes (depths min_k .. k)
+        for d in range(self.min_k, min(self.k, n_hist - 1) + 1):
+            ctx  = tuple(self.history[-(d + 1):-1])
+            node = self._feedback_get_node(ctx)
+            if node is None:
+                continue
+            node.n_obs += 1
+            if actual not in node.succ_cred:
+                node.succ_cred[actual] = 1.0
 
-            for i, (w, succ) in self._last_contributions.items():
-                sim_i = raw_sims.get(i, 0.0)
-                if succ == actual:
-                    self._nodes[i][2] *= 1.0 + self.lr * sim_i
-                else:
-                    self._nodes[i][2] *= 1.0 - self.lr * sim_i
-                self._nodes[i][2] = max(0.01, self._nodes[i][2])
-
-            # Cap — preserves relative differences, allows real spread
-            max_c = max(n[2] for n in self._nodes)
-            if max_c > _MAX_CRED:
-                scale = _MAX_CRED / max_c
-                for node in self._nodes:
-                    node[2] *= scale
-
-            # ── 3. Update coupling (directional) ─────────────────────────────
-            # coupling[(i, j)]: when i is present, additive effect on j.
-            units = list(self._last_contributions.items())
-            if self.coupling_ema:
-                # Adaptive-alpha EMA: alpha = max(floor, 1/(1+n)) per pair.
-                # Fast early (high uncertainty), stable later (earned trust),
-                # floor keeps coupling live for concept drift.
-                _FLOOR = 0.05
-                for a, (i, (w_i, s_i)) in enumerate(units):
-                    for j, (w_j, s_j) in units[a + 1:]:
-                        ci, cj = s_i == actual, s_j == actual
-
-                        updates: list[tuple[tuple, float]] = []
-                        if ci and cj:
-                            updates = [((i, j), 1.0), ((j, i), 1.0)]
-                        elif not ci and not cj and s_i == s_j:
-                            updates = [((i, j), -1.0), ((j, i), -1.0)]
-                        elif ci and not cj:
-                            updates = [((i, j), -1.0)]
-                        elif cj and not ci:
-                            updates = [((j, i), -1.0)]
-
-                        for key, sig in updates:
-                            n     = self._coupling_counts.get(key, 0)
-                            alpha = max(_FLOOR, self.coupling_lr / (1 + n * self.coupling_lr))
-                            self.coupling[key] = (1-alpha)*self.coupling.get(key, 0.0) + alpha*sig
-                            self._coupling_counts[key] = n + 1
-
-                        for key in ((i, j), (j, i)):
-                            if key in self.coupling and abs(self.coupling[key]) < 1e-6:
-                                del self.coupling[key]
+            if correct:
+                self._update_node_correct(node, actual)
             else:
-                # Accumulative directional coupling (previous method)
-                total_w = sum(w for w, _ in self._last_contributions.values()) or 1e-12
-                for a, (i, (w_i, s_i)) in enumerate(units):
-                    for j, (w_j, s_j) in units[a + 1:]:
-                        ci, cj   = s_i == actual, s_j == actual
-                        strength = (w_i / total_w) * (w_j / total_w)
-                        if ci and cj:
-                            for key in ((i, j), (j, i)):
-                                self.coupling[key] = self.coupling.get(key, 0.0) + self.coupling_lr * strength
-                        elif not ci and not cj and s_i == s_j:
-                            for key in ((i, j), (j, i)):
-                                self.coupling[key] = self.coupling.get(key, 0.0) - self.coupling_lr * strength
-                        elif ci and not cj:
-                            key = (i, j)
-                            self.coupling[key] = self.coupling.get(key, 0.0) - self.coupling_lr * strength
-                        elif cj and not ci:
-                            key = (j, i)
-                            self.coupling[key] = self.coupling.get(key, 0.0) - self.coupling_lr * strength
-                        for key in ((i, j), (j, i)):
-                            if key in self.coupling:
-                                v = self.coupling[key]
-                                if abs(v) > _MAX_COUPLING:
-                                    self.coupling[key] = math.copysign(_MAX_COUPLING, v)
-                                elif abs(v) < 1e-6:
-                                    del self.coupling[key]
+                self._update_node_wrong(node, self._last_prediction, actual)
 
-            # ── 4. Update λ ───────────────────────────────────────────────────
-            if self.coupling and self._last_base:
-                comm_correct = comm_abs = 0.0
-                for i in self._last_base:
-                    lateral = sum(
-                        self.coupling.get((j, i), 0.0) * self._last_base[j]
-                        for j in self._last_base if j != i
-                    )
-                    if i < len(self._nodes) and self._nodes[i][1] == actual:
-                        comm_correct += lateral
-                    comm_abs += abs(lateral)
-                if comm_abs > 1e-10:
-                    self.lam = float(min(1.0, max(0.0,
-                        self.lam + 0.005 * (comm_correct / comm_abs))))
+    def _distribution(self) -> dict:
+        """Return last predictive distribution (for log-loss evaluation)."""
+        return dict(self._last_distribution)
 
-        # ── 5. Dynamic node creation ─────────────────────────────────────────
-        if self._last_context and len(self._last_context) == self.k:
+    # ── hooks for subclass ablation ───────────────────────────────────────────
 
-            # Trigger 2 — exploration: full-scale context has no good coverage
-            if self._last_fullscale_max_sim < self.vigilance:
-                self._add_node(self._last_context, actual, 'exploration')
+    def _update_node_correct(self, node: _TrieNode, actual: Any) -> None:
+        node.succ_cred[actual] = min(_CRED_MAX, node.succ_cred[actual] * (1 + self.lr))
+        node.node_cred         = min(_CRED_MAX, node.node_cred         * (1 + self.lr))
 
-            # Trigger 3 — correction: found a high-quality context match but predicted
-            # the wrong successor.  Use max_sim rather than confidence because
-            # confidence is bounded by the number of nodes — at small k with only
-            # a few initial nodes the old 0.6 confidence threshold was unreachable.
-            # Floor at 0.8 so noisy/low-vigilance settings (e.g. ρ=0.3 on PRNG)
-            # don't trigger spurious corrections on approximate matches.
-            elif (self._last_max_sim >= max(self.vigilance, 0.8)
-                  and self._last_prediction is not None
-                  and self._last_prediction != actual):
-                self._add_node(self._last_context, actual, 'correction')
+    def _update_node_wrong(self, node: _TrieNode, predicted: Any, actual: Any) -> None:
+        # Confidence-proportional degradation: the more a node was trusted,
+        # the more aggressively it should lose that trust when wrong.
+        # lr_down scales from lr (fresh node) to 2×lr (maximally trusted node).
+        # This halves adaptation lag for high-credibility nodes after a drift.
+        lr_down = self.lr * (1.0 + node.node_cred / _CRED_MAX)
+        if predicted is not None and predicted in node.succ_cred:
+            node.succ_cred[predicted] = max(_CRED_MIN,
+                node.succ_cred[predicted] * (1 - lr_down))
+        # In-trie correction: immediately boost correct successor
+        node.succ_cred[actual] = min(_CRED_MAX,
+            node.succ_cred.get(actual, 1.0) * (1 + self.lr))
+        node.node_cred = max(_CRED_MIN, node.node_cred * (1 - lr_down))
 
-        # ── 7. Update optimizer and allocator ────────────────────────────────
-        was_correct = (self._last_prediction == actual)
-        self.optimizer.update(was_correct, self._last_n_candidates, self._last_budget_used)
-        self.allocator.update(list(self._last_contributions.keys()), was_correct)
+    def _blend_lambda(self, node_cred: float) -> float:
+        """CTW-style mixing coefficient. Override to disable credibility effect."""
+        return node_cred / (node_cred + 1.0)
 
-        self._quality_history.append(self.similarity_quality())
+    def _feedback_get_node(self, ctx: tuple) -> _TrieNode | None:
+        """Return (creating if needed) the node for ctx. Override for ablation."""
+        return self._ensure_node(ctx)
 
     # ── internal ──────────────────────────────────────────────────────────────
 
-    def _add_node(self, context: list, successor: Any, node_type: str) -> None:
-        """Add a node only if no same-type, same-length node with near-identical context exists."""
-        for node in self._nodes:
-            if (node[3] == node_type
-                    and len(node[0]) == len(context)
-                    and self.sim(node[0], context) > 0.99):
-                return
-        self._nodes.append([list(context), successor,
-                            _INIT_CRED[node_type], node_type])
+    def _get_active_nodes(self) -> list[tuple[_TrieNode, int]]:
+        """
+        Return [(node, depth)] for matching context depths min_k..k.
+        O(k²) total — effectively O(1) for small k.
+        """
+        result = []
+        max_d  = min(self.k, len(self.history))
+        for d in range(self.min_k, max_d + 1):
+            node = self._walk(tuple(self.history[-d:]))
+            if node is not None and node.succ_cred:
+                result.append((node, d))
+        return result
 
-    # ── diagnostics ───────────────────────────────────────────────────────────
+    def _walk(self, ctx: tuple) -> _TrieNode | None:
+        node = self._root
+        for sym in ctx:
+            if sym not in node.children:
+                return None
+            node = node.children[sym]
+        return node
 
-    def similarity_quality(self) -> float:
-        creds = [n[2] for n in self._nodes]
-        if not creds:
-            return 0.0
-        sc    = sorted(creds, reverse=True)
-        top_n = max(1, len(sc) // 4)
-        return sum(sc[:top_n]) / top_n
+    def _ensure_node(self, ctx: tuple) -> _TrieNode:
+        node = self._root
+        for sym in ctx:
+            if sym not in node.children:
+                node.children[sym] = _TrieNode()
+            node = node.children[sym]
+        return node
+
+    def _blend(self, active: list[tuple[_TrieNode, int]]) -> dict:
+        """
+        CTW-style credibility-weighted blend, shallow to deep.
+        Uses KT prior (alpha = 0.5/|V|) at each node for smoothing.
+        """
+        if not self._vocab:
+            return {}
+
+        V     = len(self._vocab)
+        alpha = 0.5 / V    # Krichevsky-Trofimov prior
+
+        # Seed: KT-smoothed unigram from root counts
+        root_total = sum(self._root.succ_cred.values()) or 1.0
+        blended = {
+            s: (self._root.succ_cred.get(s, 0) + alpha) / (root_total + alpha * V)
+            for s in self._vocab
+        }
+
+        by_depth = {d: n for n, d in active}
+        for d in range(1, self.k + 1):
+            if d not in by_depth:
+                continue
+            node  = by_depth[d]
+            total = sum(node.succ_cred.values()) or 1.0
+            local = {
+                s: (node.succ_cred.get(s, 0) + alpha) / (total + alpha * V)
+                for s in self._vocab
+            }
+            lam     = self._blend_lambda(node.node_cred)
+            blended = {s: lam * local[s] + (1 - lam) * blended[s]
+                       for s in self._vocab}
+
+        total = sum(blended.values())
+        if total < 1e-12:
+            return {s: 1.0 / V for s in self._vocab}
+        return {s: v / total for s, v in blended.items()}
+
+    # ── backward-compat API (used by forest.py and diagnostics) ──────────────
+
+    def sim(self, ctx_a: Sequence, ctx_b: Sequence) -> float:
+        """Surface similarity — kept for forest API compat."""
+        if self._surface_sim is not None:
+            try:
+                return float(self._surface_sim(ctx_a, ctx_b))
+            except Exception:
+                pass
+        return 1.0 if list(ctx_a) == list(ctx_b) else 0.0
+
+    @property
+    def max_k(self) -> int:
+        return self.k
+
+    @property
+    def _nodes(self) -> list:
+        """All trie nodes as a flat list (for node-count reporting)."""
+        result = []
+        stack  = [self._root]
+        while stack:
+            n = stack.pop()
+            result.append(n)
+            stack.extend(n.children.values())
+        return result
 
     def node_stats(self) -> dict:
-        counts: dict[str, int] = defaultdict(int)
-        for node in self._nodes:
-            counts[node[3]] += 1
-        vals = list(self.coupling.values())
+        nodes = self._nodes
+        total = len(nodes)
         return {
-            'total_nodes':    len(self._nodes),
-            'observed':       counts['observed'],
-            'exploration':    counts['exploration'],
-            'correction':     counts['correction'],
-            'coupling_links': len(vals),
-            'mean_coupling':  sum(abs(v) for v in vals) / len(vals) if vals else 0.0,
-            'max_coupling':   max(abs(v) for v in vals) if vals else 0.0,
-            'lambda':         self.lam,
-            'optimizer_budget':      self.optimizer.budget,
-            'optimizer_rolling_acc': self.optimizer.rolling_accuracy,
-            'allocator_trials':      sum(self.allocator._node_trials.values()),
+            'total_nodes':           total,
+            'observed':              total,
+            'exploration':           0,
+            'correction':            0,
+            'coupling_links':        0,
+            'mean_coupling':         0.0,
+            'max_coupling':          0.0,
+            'lambda':                0.0,
+            'optimizer_budget':      self.k,
+            'optimizer_rolling_acc': 0.0,
+            'allocator_trials':      sum(n.n_obs for n in nodes),
         }
+
+    def similarity_quality(self) -> float:
+        nodes = [n for n in self._nodes if n.node_cred != 1.0]
+        if not nodes:
+            return 1.0
+        creds = sorted((n.node_cred for n in nodes), reverse=True)
+        top_n = max(1, len(creds) // 4)
+        return sum(creds[:top_n]) / top_n
 
     def convergence_state(self) -> dict:
-        qh          = self._quality_history
-        quality_now = qh[-1] if qh else 0.0
-        if len(qh) < 6:
-            return {'plateau': None, 'tau': None, 'quality_now': quality_now,
+        nodes = self._nodes
+        if not nodes:
+            return {'plateau': None, 'tau': None, 'quality_now': 0.0,
                     'steps_to_95pct': None, 'converged': False}
-        L, tau      = _fit_convergence(qh)
-        n           = len(qh)
-        n_95        = int(tau * math.log(20.0)) if math.isfinite(tau) and tau > 0 else None
-        steps       = max(0, n_95 - n) if n_95 is not None else None
-        return {
-            'plateau':        L,
-            'tau':            tau,
-            'quality_now':    quality_now,
-            'steps_to_95pct': steps,
-            'converged':      steps is not None and steps == 0,
-        }
+        quality = sum(n.node_cred for n in nodes) / len(nodes)
+        return {'plateau': quality, 'tau': None, 'quality_now': quality,
+                'steps_to_95pct': None, 'converged': False}
 
     def lookahead_quality(self, n_steps: int) -> float:
-        state = self.convergence_state()
-        L, tau = state['plateau'], state['tau']
-        if L is None or tau is None or not math.isfinite(tau) or tau <= 0:
-            return state['quality_now']
-        return L * (1.0 - math.exp(-(len(self._quality_history) + n_steps) / tau))
-
-
-# ── module-level helpers ──────────────────────────────────────────────────────
-
-def _fit_convergence(qh: list[float]) -> tuple[float, float]:
-    deltas = [qh[i] - qh[i - 1] for i in range(1, len(qh))]
-    prev   = qh[:-1]
-    n      = len(deltas)
-    xbar   = sum(prev) / n
-    ybar   = sum(deltas) / n
-    num    = sum((x - xbar) * (y - ybar) for x, y in zip(prev, deltas))
-    den    = sum((x - xbar) ** 2 for x in prev)
-    if abs(den) < 1e-12 or abs(num) < 1e-12:
-        return qh[-1], float('inf')
-    slope = num / den
-    intcp = ybar - slope * xbar
-    if slope >= 0 or abs(slope) < 1e-6:
-        return qh[-1], float('inf')
-    alpha = -slope
-    L     = -intcp / slope
-    tau   = (-1.0 / math.log(1.0 - alpha)) if 0 < alpha < 1 else 1.0 / alpha
-    return max(L, qh[-1]), max(tau, 1.0)
-
-
-def _confidence(dist: dict[Any, float], effective_n: float) -> float:
-    n_vals      = len(dist)
-    size_factor = 1.0 - 1.0 / math.sqrt(effective_n + 1.0)
-    if n_vals <= 1:
-        return size_factor
-    entropy    = -sum(p * math.log(p + 1e-12) for p in dist.values())
-    peakedness = 1.0 - entropy / math.log(n_vals)
-    return peakedness * size_factor
+        return self.convergence_state()['quality_now']

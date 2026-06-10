@@ -82,3 +82,25 @@ def random_integers(n: int = 500, low: int = 0, high: int = 9, seed: int | None 
     """Uniformly random integers — the unpredictable baseline."""
     rng = random.Random(seed) if seed is not None else random
     return [rng.randint(low, high) for _ in range(n)]
+
+
+def load_electricity(n: int | None = None) -> list[int]:
+    """
+    Electricity market dataset (Harries 1999) — 45,312 binary steps.
+    Target: 0=DOWN, 1=UP (NSW electricity price movement relative to a
+    24-hour moving average).  Standard concept-drift benchmark: consumption
+    patterns and market structure shift across a 2-year window (May 1996 –
+    Dec 1998).  Source: OpenML dataset #151 via sklearn.
+    """
+    import os, pickle
+    cache = os.path.join(os.path.dirname(__file__), '_elec_cache.pkl')
+    if os.path.exists(cache):
+        with open(cache, 'rb') as f:
+            labels = pickle.load(f)
+    else:
+        from sklearn.datasets import fetch_openml
+        data   = fetch_openml('electricity', version=1, as_frame=True, parser='auto')
+        labels = [1 if v == 'UP' else 0 for v in data.target.tolist()]
+        with open(cache, 'wb') as f:
+            pickle.dump(labels, f)
+    return labels[:n] if n is not None else labels

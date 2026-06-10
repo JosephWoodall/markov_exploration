@@ -1,0 +1,17 @@
+\begin{table}[h]
+\centering
+\caption{Log-loss (bits/symbol) on standard benchmarks (Laplace-smoothed, $\alpha{=}0.1$). Lower is better; \textbf{bold} = best.}
+\label{tab:logloss}
+\begin{tabular}{lrrrrrrr}
+\toprule
+Dataset & Persistence & Majority & N-gram(5) & PPM-D(5) & CTW(5) & Predictor & Forest \\
+\midrule
+Airline & \textbf{300.00\%} & \textbf{300.00\%} & 390.08\% & 367.17\% & 380.43\% & 382.17\% & \textbf{300.00\%} \\
+Alice & 464.39\% & 464.39\% & 404.95\% & \underline{360.95\%} & 365.23\% & \textbf{337.65\%} & 464.39\% \\
+DNA & \underline{200.00\%} & \underline{200.00\%} & 200.23\% & 250.45\% & 211.78\% & \textbf{197.27\%} & \underline{200.00\%} \\
+Weather & 158.50\% & 158.50\% & \underline{139.77\%} & 163.35\% & 140.51\% & \textbf{137.82\%} & 158.50\% \\
+PRNG & \textbf{332.19\%} & \textbf{332.19\%} & 334.73\% & 393.52\% & 332.97\% & 353.89\% & \textbf{332.19\%} \\
+Electricity & 100.00\% & 100.00\% & 59.41\% & \underline{59.41\%} & \textbf{59.38\%} & 89.98\% & 100.00\% \\
+\bottomrule
+\end{tabular}
+\end{table}
