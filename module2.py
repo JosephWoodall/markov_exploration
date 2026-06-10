@@ -281,35 +281,40 @@ class GoalDirectedGenerator:
         top_k: int = 1,
     ) -> list[tuple[Any, float]]:
         """
-        Find the most similar prompt(s) in `corpus` using successor-distribution
-        similarity (Bhattacharyya coefficient on the trie distributions), and
-        return their stored responses.
+        Find the most similar prompt(s) in `corpus` using the post-separator
+        successor distribution as the comparison signal.
+
+        How it works
+        ------------
+        After training on [prompt SEP answer END] sequences, the trie learns
+        a distribution over the FIRST ANSWER TOKEN at every context ending in
+        [prompt[-k:] + SEP].  This distribution encodes what answer the model
+        associates with each training prompt — Paris for France, Berlin for
+        Germany, etc.
+
+        For retrieval, we compare the model's prediction at [query + SEP] with
+        its prediction at [each_training_prompt + SEP].  The training prompt
+        whose post-SEP distribution most resembles the query's is returned.
+
+        For seen queries this is exact (Bhattacharyya ≈ 1.0 against the correct
+        match, near 0 against others).  For novel queries the model falls back
+        to a shallower context; the returned response is the best guess from
+        whatever partial context the trie can match.
 
         Parameters
         ----------
-        query  : the query prompt as a token sequence.
-        corpus : list of (prompt, response) pairs used during training.
+        query  : the query prompt tokens (without SEPARATOR or answer).
+        corpus : list of (prompt_tokens, response) pairs from training.
         top_k  : number of (response, similarity_score) results to return.
-
-        Returns
-        -------
-        List of (response, similarity_score) pairs, sorted best-first.
-
-        Notes
-        -----
-        The similarity is computed at the last context position of each prompt
-        (position = len(prompt) - 1), where the trie has the most specific
-        information.  Prompts not seen during training fall back to a shallower
-        context match.
         """
-        # Compute query distribution at the end of the query sequence
-        query_ctx  = tuple(query[-self.predictor.k:])
-        query_dist = _blend_from_context(self.predictor, query_ctx)
+        # Distribution at [query + SEP] = what the model predicts first for this prompt
+        query_seed = tuple(list(query)[-self.predictor.k:] + [self.separator])
+        query_dist = _blend_from_context(self.predictor, query_seed)
 
         scores = []
         for prompt, response in corpus:
-            ctx  = tuple(list(prompt)[-self.predictor.k:])
-            dist = _blend_from_context(self.predictor, ctx)
+            seed = tuple(list(prompt)[-self.predictor.k:] + [self.separator])
+            dist = _blend_from_context(self.predictor, seed)
             sim  = _bhattacharyya(query_dist, dist)
             scores.append((response, sim))
 

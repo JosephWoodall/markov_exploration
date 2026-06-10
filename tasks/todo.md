@@ -24,7 +24,7 @@
 - [x] Autoregressive completion (`complete()`)
 - [x] Beam search generation (`beam_search()`)
 - [x] Retrieval-based answering (`retrieve()`)
-- [ ] End-to-end demo: train on formatted Q&A sequence, answer novel queries
+- [x] End-to-end demo: train on formatted Q&A sequence, answer novel queries (`demo_module2.py`)
 - [ ] Benchmark Module 2 on a factual retrieval task (e.g., SimpleQuestions subset)
 - [ ] Context-window extension: sliding-window attention over long prompts
 - [ ] Evaluate beam search vs. greedy vs. retrieval on short-answer tasks
@@ -49,6 +49,7 @@
 
 ## Near-term priorities (next session)
 
-1. Module 2 end-to-end demo — proves the world-model use case
+1. ~~Module 2 end-to-end demo~~ — DONE (`demo_module2.py`)
 2. Paper abstract + introduction — the narrative frame determines what experiments to add
-3. Electricity gap analysis — 79% vs 84.8%; understand the structural ceiling, decide if it's worth closing or worth framing as "the tradeoff for drift adaptation"
+3. Module 2 semantic retrieval — replace exact-match trie lookup with embedding-based
+   similarity so novel tokens can generalize (currently falls back to root unigram)
