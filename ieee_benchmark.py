@@ -62,7 +62,7 @@ from run_experiments import discretize, normalize
 from similarity import gaussian, hamming
 from datasets import (load_airline_passengers, load_gutenberg_text,
                       load_dna_sequence, load_weather_events, random_integers,
-                      load_electricity)
+                      load_electricity, load_moby_dick)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -749,12 +749,13 @@ def _load_standard_datasets():
         'sim': gaussian(sigma=2.0), 'k': 4, 'vig': 0.3, 'forest_kw': {},
     })
     for loader, name, k, vig, fkw in [
-        (lambda: load_gutenberg_text(n_chars=1500),
-         'Alice', 3, 0.7,
-         {'heterogeneous_k': False, 'auto_grow': False, 'auto_prune': False}),
-        (lambda: load_dna_sequence(n_bases=1500),
-         'DNA',   4, 0.3, {}),
-        (lambda: load_weather_events(n_days=500),
+        (lambda: load_gutenberg_text(n_chars=15_000),
+         'Alice (15K)', 5, 0.7, {}),
+        (lambda: load_moby_dick(n_chars=50_000),
+         'Moby Dick (50K)', 5, 0.7, {}),
+        (lambda: load_dna_sequence(n_bases=None),
+         'DNA (full 48K)', 5, 0.3, {'n_trees': 2, 'heterogeneous_k': False}),
+        (lambda: load_weather_events(n_days=None),
          'Weather', 3, 0.3, {}),
     ]:
         try:

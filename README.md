@@ -68,7 +68,7 @@ The multiplicative credibility update is an instance of the Multiplicative Weigh
 
 | Mechanism | How it works |
 |---|---|
-| Heterogeneous k | Each tree uses a different context length: k, k+1, k+2, … capturing different temporal scales |
+| Heterogeneous k | Each tree uses a different context length: k, k+1, k+2, … capturing different temporal scales. Disabled for DNA (4-symbol near-uniform alphabet) where deeper-k trees add noise rather than signal. |
 | Feedback dropout | Each tree independently skips learning on each step with probability `dropout` — the sequence analogue of bagging |
 | Staggered offsets | Tree i doesn't start learning until step `i × stagger`; early topology has outsized influence on later structure |
 | Inter-tree credibility | Each tree maintains a persistent weight updated by whether it was right; correct trees speak louder on the next prediction |
@@ -124,7 +124,7 @@ Evaluated on 7 standard datasets (two large text corpora, full DNA genome) and 4
 | Airline passengers | 144 | 4 | 37.9 | 27.6 | 31.0 | 37.9 | **41.4** |
 | Alice in Wonderland (15K) | 15,000 | 5 | 2.8 | 51.6 | **53.3** | 50.8 | 50.7 |
 | Moby Dick (50K) | 50,000 | 5 | 2.1 | 45.7 | **47.4** | 44.0 | 45.4 |
-| DNA — bacteriophage lambda (full) | 48,502 | 5 | 26.1 | 29.7 | **30.7** | 28.1 | 27.0 |
+| DNA — bacteriophage lambda (full) | 48,502 | 5 | 26.1 | 29.7 | **30.7** | 28.1 | 28.0 |
 | Weather | 547 | 3 | **57.3** | 47.3 | 50.0 | 48.2 | 50.9 |
 | PRNG (noise floor) | 500 | 3 | 10.0 | **18.0** | 16.0 | 14.0 | 13.0 |
 | Electricity (45K) | 45,312 | 4 | **84.8** | **84.8** | **84.8** | 79.0 | 83.5 |
