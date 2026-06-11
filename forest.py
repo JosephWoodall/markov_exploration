@@ -244,27 +244,46 @@ class PredictorForest:
         active  = self._active
         n_total = len(self.trees)
 
-        dists: list[dict[Any, float]] = [{} for _ in range(n_total)]
-        confs: list[float]            = [0.0] * n_total
+        dists_full:  list[dict[Any, float]] = [{} for _ in range(n_total)]
+        dists_crude: list[dict[Any, float]] = [{} for _ in range(n_total)]
+        confs: list[float]                  = [0.0] * n_total
 
         for i in active:
-            pred, conf = self.trees[i].predict()
+            pred, conf          = self.trees[i].predict()
             self._last_preds[i] = pred
-            dists[i] = self._tree_dist(self.trees[i])
-            confs[i] = conf
+            crude               = self._tree_dist(self.trees[i])
+            full                = self.trees[i]._distribution()
+            dists_full[i]       = full if full else crude
+            dists_crude[i]      = crude
+            confs[i]            = conf
 
-        active_dists = [dists[i] for i in active]
-        active_confs = [confs[i] for i in active]
+        active_full  = [dists_full[i]       for i in active]
+        active_crude = [dists_crude[i]      for i in active]
+        active_confs = [confs[i]            for i in active]
         active_creds = [self._tree_creds[i] for i in active]
 
         if self.voting == 'mixture':
-            dist = self._mixture_dist(active_dists, active_confs, active_creds)
+            # Full blended distributions for calibrated mixture
+            dist = self._mixture_dist(active_full, active_confs, active_creds)
         elif self.voting == 'product':
-            dist = self._product_dist(active_dists, active_confs, active_creds)
+            # Crude mode-focused distributions for decisive agreement signal
+            dist = self._product_dist(active_crude, active_confs, active_creds)
             if not dist:
-                dist = self._mixture_dist(active_dists, active_confs, active_creds)
-        else:  # adaptive
-            dist = self._adaptive_dist(active_dists, active_confs, active_creds)
+                dist = self._mixture_dist(active_full, active_confs, active_creds)
+        else:  # adaptive: full for mixture, crude for product
+            alpha = sum(c for c in active_confs if c > 0) / (len(active_confs) or 1)
+            mix  = self._mixture_dist(active_full,  active_confs, active_creds)
+            prod = self._product_dist(active_crude, active_confs, active_creds)
+            if not prod:
+                dist = mix
+            elif not mix:
+                dist = prod
+            else:
+                vocab   = set(mix) | set(prod)
+                blended = {v: alpha * prod.get(v, 0.0) + (1.0 - alpha) * mix.get(v, 0.0)
+                           for v in vocab}
+                total   = sum(blended.values())
+                dist    = {v: p / total for v, p in blended.items()} if total > 1e-12 else mix
 
         return self._dist_to_prediction(dist)
 

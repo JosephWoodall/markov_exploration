@@ -73,7 +73,12 @@ The multiplicative credibility update is an instance of the Multiplicative Weigh
 | Staggered offsets | Tree i doesn't start learning until step `i × stagger`; early topology has outsized influence on later structure |
 | Inter-tree credibility | Each tree maintains a persistent weight updated by whether it was right; correct trees speak louder on the next prediction |
 
-**Voting:** product-of-experts (weighted geometric mean of per-tree distributions). An outcome one tree assigns near-zero probability is suppressed even if other trees favour it — this collapses toward uniform when trees disagree, which is the correct response to uncertainty. Mixture voting is available as a fallback for sparse data.
+**Voting:** adaptive hybrid by default. Each tree contributes two representations:
+
+- **Full blended distribution** (`tree._distribution()`) — the complete CTW-style probability over all vocabulary symbols. Used in the *mixture* component: proper calibration when trees at different context lengths express partial disagreement.
+- **Mode-focused distribution** (`_tree_dist`) — only the most-probable successor at each depth, weighted by node credibility. Used in the *product* component: maximally decisive agreement signal for high-persistence or low-entropy data where unanimous tree confidence should dominate.
+
+The adaptive blend computes `α × product(mode-focused) + (1−α) × mixture(full)` where `α` is the mean per-tree confidence — high confidence drives product-mode behaviour, uncertainty drives mixture-mode behaviour.
 
 ---
 
@@ -96,26 +101,35 @@ Module 1 learns that SEPARATOR is followed by responses, not more prompts. No ar
 |---|---|---|
 | **Autoregressive** | Feed `[prompt + SEPARATOR]` as context seed; generate token by token until END | Direct completion, short responses |
 | **Beam search** | Maintain N candidate sequences; at each step expand by all vocabulary tokens; prune to top N by cumulative log-probability | Longer responses, controllable diversity |
-| **Retrieval** | Find the most similar prompt in training data by successor-distribution similarity; return its stored response | Factual lookup, repeated-query scenarios |
+| **Retrieval** | Two-stage: (1) Bhattacharyya similarity on post-SEP trie distributions — exact for seen prompts; (2) surface Jaccard fallback when Bhattacharyya < 0.5 — domain-correct for novel tokens | Factual lookup; graceful degradation to novel inputs |
+
+**Retrieval degradation tiers:**
+
+| Bhattacharyya score | Signal | Response quality |
+|---|---|---|
+| ≈ 1.0 | Exact trie match | Correct answer |
+| < 0.5 (with Jaccard fallback) | Novel token → root unigram | Domain-correct (right type: capital city, symbol, etc.) |
+| No surface overlap | Root unigram, all prompts identical | Random training answer |
 
 ---
 
 ## Benchmark Results
 
-Evaluated on 6 standard datasets and 4 concept-drift streams. All methods use the same context length k and train/test split (80/20). Baselines: Persistence (predict last seen), Majority, N-gram(5), PPM-D(5), CTW(5).
+Evaluated on 7 standard datasets (two large text corpora, full DNA genome) and 4 concept-drift streams. All methods use the same train/test split (80/20). Baselines: Persistence, Majority, N-gram(5), PPM-D(5), CTW(5).
 
 **Standard benchmarks (test accuracy %):**
 
-| Dataset | Persistence | PPM-D | CTW | **Predictor** | **Forest** |
-|---|---|---|---|---|---|
-| Airline passengers | **37.9** | 27.6 | 31.0 | **37.9** | 29.6 |
-| Alice in Wonderland | 3.7 | 37.3 | **38.7** | 35.0 | 34.7 |
-| DNA sequences | 28.7 | 30.7 | 27.3 | **33.0** | 28.3 |
-| Weather | **48.0** | 46.0 | **48.0** | 41.0 | **49.0** |
-| PRNG (noise floor) | 10.0 | **18.0** | 16.0 | 14.0 | 13.0 |
-| Electricity (45K) | **84.8** | **84.8** | **84.8** | 79.0 | 83.7 |
+| Dataset | n | k | Persistence | PPM-D(5) | CTW(5) | **Predictor** | **Forest** |
+|---|---|---|---|---|---|---|---|
+| Airline passengers | 144 | 4 | 37.9 | 27.6 | 31.0 | 37.9 | **41.4** |
+| Alice in Wonderland (15K) | 15,000 | 5 | 2.8 | 51.6 | **53.3** | 50.8 | 50.7 |
+| Moby Dick (50K) | 50,000 | 5 | 2.1 | 45.7 | **47.4** | 44.0 | 45.4 |
+| DNA — bacteriophage lambda (full) | 48,502 | 5 | 26.1 | 29.7 | **30.7** | 28.1 | 27.0 |
+| Weather | 547 | 3 | **57.3** | 47.3 | 50.0 | 48.2 | 50.9 |
+| PRNG (noise floor) | 500 | 3 | 10.0 | **18.0** | 16.0 | 14.0 | 13.0 |
+| Electricity (45K) | 45,312 | 4 | **84.8** | **84.8** | **84.8** | 79.0 | 83.5 |
 
-**Concept-drift streams (test accuracy %, k=1, all methods capped at order 1):**
+**Concept-drift streams (test accuracy %, k=1):**
 
 | Drift type | N-gram | PPM-D | CTW | **Predictor** | **Forest** |
 |---|---|---|---|---|---|
@@ -124,7 +138,43 @@ Evaluated on 6 standard datasets and 4 concept-drift streams. All methods use th
 | Recurring A→B→A | 3.8 | 3.3 | 4.2 | **97.5** | **97.5** |
 | Fast (150-step cycles) | 40.0 | 39.6 | 40.4 | **94.6** | 93.3 |
 
-The Electricity gap (79% vs 84.8%) reflects a fundamental property of credibility-based vs. count-based methods on high-autocorrelation stationary data: count-based methods can accumulate arbitrarily sharp predictions, while credibility is capped. The Forest closes this gap to 1.1pp (83.7%). On concept-drift tasks, count-based methods effectively collapse to random guessing while the Predictor maintains 94–98% accuracy.
+**Log-loss — Predictor wins on Weather; nearly ties CTW on DNA. PPM-D wins on Alice and Moby Dick.**
+
+---
+
+### Confidence-gated prediction (abstain mode)
+
+`UniversalPredictor` accepts a `min_confidence` parameter (default `0.0`). When set, the predictor abstains — returns `(None, conf)` — whenever its best prediction is less than `min_confidence × (1/|vocab|)` above the uniform baseline. A value of `1.5` means "only predict when at least 1.5× more confident than random."
+
+Abstaining does not penalize the node: `node_cred` is unchanged (abstaining is not a wrong prediction). The successor distribution still updates so learning continues. This makes the warmup period implicit — early steps where the predictor is near-uniform simply produce no output rather than noisy guesses.
+
+**Precision–coverage tradeoffs measured on natural language (Alice, k=4):**
+
+| min_confidence | Accuracy (predicted only) | Coverage | Lift |
+|---|---|---|---|
+| 0.0 (off) | 48.5% | 100% | — |
+| 3.0 | 50.3% | 96.5% | +1.8pp |
+| 4.0 | 56.7% | 83.7% | +8.2pp |
+| 5.0 | 59.4% | 77.6% | +10.9pp |
+| 6.0 | 61.4% | 71.8% | +12.9pp |
+
+The gain is real: predictions the model skips are genuinely its worst ones. Alice at min_conf=5.0 reaches 59.4% accuracy (vs CTW's 53.3% on 100% coverage) by only speaking when confident. For use cases where coverage matters less than per-prediction reliability, this is the correct mode.
+
+**Note on vocabulary size:** `min_confidence` is normalized by `1/|vocab|`, so the same value applies comparably across different alphabet sizes (4 symbols for DNA, 26 for text). Weather (5-symbol alphabet, near-uniform predictor) requires `min_confidence < 1.5` to produce any predictions.
+
+---
+
+### The two-regime finding
+
+Expanding from small samples to full datasets exposed a fundamental architectural property:
+
+**Data-limited regime (n ≲ 5K):** Credibility builds up quickly, blend weights become decisive, and the Predictor is competitive or best. At 1,500 DNA bases the Predictor was 33.0% — best across all methods.
+
+**Architecture-limited regime (n ≫ CRED_MAX/lr ≈ 80 steps to cap):** Every node hits `CRED_MAX=8.0` and the blend weight freezes at λ=8/9=0.889. Count-based methods (PPM-D, CTW) have no cap — their counts keep growing, giving predictions increasingly close to 1.0. At 48K DNA bases CTW reaches 30.7% while the Predictor drops to 26.2%.
+
+**The exception is noisy and drifting data.** Weather improved from 41% to 48.2% with more days (nearly matching CTW at 50%) because Weather's noise prevents count-based methods from exploiting large counts — they overfit to stale patterns while the Predictor's credibility mechanism provides appropriate uncertainty. On all four drift streams the Predictor still dominates at 94–98% regardless of scale.
+
+**The CRED_MAX cap is a design choice, not a bug.** A node with unbounded credibility would adapt from drift in O(n) steps. The cap guarantees O(1/CRED_MAX) adaptation speed: a maximally-trusted node that turns wrong loses credibility at 2× the base rate (confidence-proportional degradation). The trade-off is explicit: fast drift recovery at the cost of long-term convergence on stationary data.
 
 ---
 
