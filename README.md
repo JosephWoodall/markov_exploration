@@ -122,8 +122,8 @@ Evaluated on 7 standard datasets (two large text corpora, full DNA genome) and 4
 | Dataset | n | k | Persistence | PPM-D(5) | CTW(5) | **Predictor** | **Forest** |
 |---|---|---|---|---|---|---|---|
 | Airline passengers | 144 | 4 | 37.9 | 27.6 | 31.0 | 37.9 | **41.4** |
-| Alice in Wonderland (15K) | 15,000 | 5 | 2.8 | 51.6 | **53.3** | 50.8 | 50.7 |
-| Moby Dick (50K) | 50,000 | 5 | 2.1 | 45.7 | **47.4** | 44.0 | 45.4 |
+| Alice in Wonderland (15K) | 15,000 | 5 | 2.8 | 51.6 | **53.3** | 50.8 | 51.7 |
+| Moby Dick (50K) | 50,000 | 5 | 2.1 | 45.7 | **47.4** | 44.0 | 45.7 |
 | DNA — bacteriophage lambda (full) | 48,502 | 5 | 26.1 | 29.7 | **30.7** | 28.1 | 28.0 |
 | Weather | 547 | 3 | **57.3** | 47.3 | 50.0 | 48.2 | 50.9 |
 | PRNG (noise floor) | 500 | 3 | 10.0 | **18.0** | 16.0 | 14.0 | 13.0 |

@@ -750,9 +750,9 @@ def _load_standard_datasets():
     })
     for loader, name, k, vig, fkw in [
         (lambda: load_gutenberg_text(n_chars=15_000),
-         'Alice (15K)', 5, 0.7, {}),
+         'Alice (15K)', 5, 0.7, {'n_trees': 3}),
         (lambda: load_moby_dick(n_chars=50_000),
-         'Moby Dick (50K)', 5, 0.7, {}),
+         'Moby Dick (50K)', 5, 0.7, {'n_trees': 3}),
         (lambda: load_dna_sequence(n_bases=None),
          'DNA (full 48K)', 5, 0.3, {'n_trees': 2, 'heterogeneous_k': False}),
         (lambda: load_weather_events(n_days=None),
