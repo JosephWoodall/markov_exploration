@@ -1,6 +1,27 @@
 import json
+import os
+import pickle
 import random
 import urllib.request
+
+_CACHE_DIR = os.path.dirname(__file__)
+
+
+def _cache_path(name: str) -> str:
+    return os.path.join(_CACHE_DIR, f'_{name}_cache.pkl')
+
+
+def _load_cache(name: str):
+    p = _cache_path(name)
+    if os.path.exists(p):
+        with open(p, 'rb') as f:
+            return pickle.load(f)
+    return None
+
+
+def _save_cache(name: str, data) -> None:
+    with open(_cache_path(name), 'wb') as f:
+        pickle.dump(data, f)
 
 
 def load_airline_passengers() -> list[float]:
@@ -26,32 +47,68 @@ def load_airline_passengers() -> list[float]:
         ]
 
 
-def load_gutenberg_text(n_chars: int = 1500) -> list[str]:
-    """Character-level sequence from Alice in Wonderland (Project Gutenberg)."""
-    url = "https://www.gutenberg.org/files/11/11-0.txt"
-    req = urllib.request.Request(url, headers={"User-Agent": "markov-exploration/1.0"})
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        raw = resp.read().decode("utf-8", errors="ignore")
-    start = raw.find("CHAPTER I")
-    text = raw[start : start + n_chars * 2] if start != -1 else raw[: n_chars * 2]
-    chars = [c.lower() for c in text if c.isalpha() or c == " "]
-    return chars[:n_chars]
+def load_gutenberg_text(n_chars: int | None = 1500) -> list[str]:
+    """
+    Character-level sequence from Alice in Wonderland (Project Gutenberg).
+    n_chars=None returns all available alpha/space characters (~130K).
+    Results are cached locally after the first download.
+    """
+    cached = _load_cache('alice')
+    if cached is None:
+        url = "https://www.gutenberg.org/files/11/11-0.txt"
+        req = urllib.request.Request(url, headers={"User-Agent": "markov-exploration/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+        start = raw.find("CHAPTER I")
+        text  = raw[start:] if start != -1 else raw
+        cached = [c.lower() for c in text if c.isalpha() or c == " "]
+        _save_cache('alice', cached)
+    return cached if n_chars is None else cached[:n_chars]
 
 
-def load_dna_sequence(n_bases: int = 1500) -> list[str]:
-    """Bacteriophage lambda genome nucleotides from NCBI (accession J02459)."""
-    url = (
-        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-        "?db=nucleotide&id=J02459&rettype=fasta&retmode=text"
-    )
-    req = urllib.request.Request(url, headers={"User-Agent": "markov-exploration/1.0"})
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        raw = resp.read().decode("ascii", errors="ignore")
-    seq = "".join(line.strip() for line in raw.splitlines() if not line.startswith(">"))
-    return list(seq[:n_bases].lower())
+def load_moby_dick(n_chars: int | None = 50_000) -> list[str]:
+    """
+    Character-level sequence from Moby Dick (Project Gutenberg #2701).
+    ~550K alpha/space chars available; default uses 50K.
+    Results are cached locally after the first download.
+    """
+    cached = _load_cache('mobydick')
+    if cached is None:
+        url = "https://www.gutenberg.org/cache/epub/2701/pg2701.txt"
+        req = urllib.request.Request(url, headers={"User-Agent": "markov-exploration/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+        start = raw.find("CHAPTER 1")
+        if start == -1:
+            start = raw.find("CHAPTER I")
+        text  = raw[start:] if start != -1 else raw
+        cached = [c.lower() for c in text if c.isalpha() or c == " "]
+        _save_cache('mobydick', cached)
+    return cached if n_chars is None else cached[:n_chars]
 
 
-def load_weather_events(n_days: int = 500) -> list[str]:
+def load_dna_sequence(n_bases: int | None = 1500) -> list[str]:
+    """
+    Bacteriophage lambda genome nucleotides (NCBI accession J02459, 48,502 bp).
+    n_bases=None returns the full genome.
+    Results are cached locally after the first download.
+    """
+    cached = _load_cache('dna')
+    if cached is None:
+        url = (
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+            "?db=nucleotide&id=J02459&rettype=fasta&retmode=text"
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": "markov-exploration/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("ascii", errors="ignore")
+        seq = "".join(line.strip() for line in raw.splitlines() if not line.startswith(">"))
+        cached = list(seq.lower())
+        _save_cache('dna', cached)
+    return cached if n_bases is None else cached[:n_bases]
+
+
+def load_weather_events(n_days: int | None = 500) -> list[str]:
     """Daily WMO weather codes for NYC 2020–2021, coarsened to 5 categories."""
     url = (
         "https://archive-api.open-meteo.com/v1/archive"
@@ -61,7 +118,9 @@ def load_weather_events(n_days: int = 500) -> list[str]:
     )
     with urllib.request.urlopen(url, timeout=15) as resp:
         data = json.loads(resp.read().decode())
-    codes = data["daily"]["weather_code"][:n_days]
+    codes = data["daily"]["weather_code"]
+    if n_days is not None:
+        codes = codes[:n_days]
     return [_coarsen(c) for c in codes]
 
 
@@ -92,8 +151,7 @@ def load_electricity(n: int | None = None) -> list[int]:
     patterns and market structure shift across a 2-year window (May 1996 –
     Dec 1998).  Source: OpenML dataset #151 via sklearn.
     """
-    import os, pickle
-    cache = os.path.join(os.path.dirname(__file__), '_elec_cache.pkl')
+    cache = os.path.join(_CACHE_DIR, '_elec_cache.pkl')
     if os.path.exists(cache):
         with open(cache, 'rb') as f:
             labels = pickle.load(f)

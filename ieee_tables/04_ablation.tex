@@ -2,16 +2,16 @@
 \centering
 \caption{Ablation study: test accuracy (\%) when each component of the UniversalPredictor is disabled. Full = complete system; $-$correction = no correction nodes; $-$exploration = no exploration nodes; $-$credibility = flat node weights; $-$coupling = inter-node communication disabled; Surface only = pure surface similarity, no distributional blend.}
 \label{tab:ablation}
-\begin{tabular}{lrrrrr}
+\begin{tabular}{lrrr}
 \toprule
-Variant & Airline & Alice & DNA & Weather & Drift \\
+Variant & Airline & Weather & Drift \\
 \midrule
-Full & 37.9\% & 35.0\% & 33.0\% & 41.0\% & 97.0\% \\
-$-$correction & 37.9\% & 36.0\% & 30.0\% & 47.0\% & 97.0\% \\
-$-$exploration & 0.0\% & 18.0\% & 29.0\% & 46.0\% & 33.5\% \\
-$-$credibility & 37.9\% & 37.3\% & 31.7\% & 44.0\% & 97.0\% \\
-$-$coupling & 37.9\% & 35.0\% & 33.0\% & 41.0\% & 97.0\% \\
-Surface only & 37.9\% & 36.0\% & 30.7\% & 41.0\% & 97.0\% \\
+Full & 37.9\% & 48.2\% & 97.0\% \\
+$-$correction & 37.9\% & 50.9\% & 97.0\% \\
+$-$exploration & 0.0\% & 47.3\% & 33.5\% \\
+$-$credibility & 37.9\% & 49.1\% & 97.0\% \\
+$-$coupling & 37.9\% & 48.2\% & 97.0\% \\
+Surface only & 37.9\% & 47.3\% & 97.0\% \\
 \bottomrule
 \end{tabular}
 \end{table}

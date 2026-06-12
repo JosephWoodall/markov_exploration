@@ -279,47 +279,59 @@ class GoalDirectedGenerator:
         query: Sequence,
         corpus: list[tuple[Sequence, Any]],
         top_k: int = 1,
+        surface_sim_fn=None,
+        novel_threshold: float = 0.5,
     ) -> list[tuple[Any, float]]:
         """
-        Find the most similar prompt(s) in `corpus` using the post-separator
-        successor distribution as the comparison signal.
+        Find the most similar prompt(s) in `corpus`.
 
-        How it works
-        ------------
-        After training on [prompt SEP answer END] sequences, the trie learns
-        a distribution over the FIRST ANSWER TOKEN at every context ending in
-        [prompt[-k:] + SEP].  This distribution encodes what answer the model
-        associates with each training prompt — Paris for France, Berlin for
-        Germany, etc.
+        Stage 1 — trie similarity (Bhattacharyya on post-SEP distributions):
+        Compares the model's next-token prediction at [query + SEP] against
+        every training prompt.  For seen queries this is near-exact
+        (Bhattacharyya ≈ 1.0 against the correct match, near 0 against others).
 
-        For retrieval, we compare the model's prediction at [query + SEP] with
-        its prediction at [each_training_prompt + SEP].  The training prompt
-        whose post-SEP distribution most resembles the query's is returned.
-
-        For seen queries this is exact (Bhattacharyya ≈ 1.0 against the correct
-        match, near 0 against others).  For novel queries the model falls back
-        to a shallower context; the returned response is the best guess from
-        whatever partial context the trie can match.
+        Stage 2 — surface similarity fallback (optional):
+        If the best trie score is below `novel_threshold` — which happens when
+        a novel token forces the model to fall back to the root unigram, making
+        every training prompt look equally similar — and a `surface_sim_fn` is
+        provided, the corpus is re-ranked by token-overlap similarity instead.
+        This gives domain-correct responses for novel tokens that share template
+        structure with training data (e.g., "capital of Egypt" → closest match
+        is other "capital of X" questions, returning a city name even if wrong).
 
         Parameters
         ----------
-        query  : the query prompt tokens (without SEPARATOR or answer).
-        corpus : list of (prompt_tokens, response) pairs from training.
-        top_k  : number of (response, similarity_score) results to return.
+        query           : query prompt tokens (without SEPARATOR or answer).
+        corpus          : list of (prompt_tokens, response) pairs.
+        top_k           : results to return.
+        surface_sim_fn  : callable(list, list) → float, used as fallback.
+                          Pass similarity.jaccard for token-overlap retrieval.
+        novel_threshold : Bhattacharyya score below which Stage 2 triggers.
         """
-        # Distribution at [query + SEP] = what the model predicts first for this prompt
         query_seed = tuple(list(query)[-self.predictor.k:] + [self.separator])
         query_dist = _blend_from_context(self.predictor, query_seed)
 
-        scores = []
+        trie_scores: list[tuple[Any, float, Sequence]] = []
         for prompt, response in corpus:
             seed = tuple(list(prompt)[-self.predictor.k:] + [self.separator])
             dist = _blend_from_context(self.predictor, seed)
             sim  = _bhattacharyya(query_dist, dist)
-            scores.append((response, sim))
+            trie_scores.append((response, sim, prompt))
 
-        scores.sort(key=lambda x: x[1], reverse=True)
-        return scores[:top_k]
+        trie_scores.sort(key=lambda x: x[1], reverse=True)
+        best = trie_scores[0][1] if trie_scores else 0.0
+
+        if surface_sim_fn is not None and best < novel_threshold:
+            # Novel token — trie falls back to root unigram, indiscriminate.
+            # Re-rank by surface token overlap to at least get the right domain.
+            surf_scores = [
+                (resp, surface_sim_fn(list(query), list(prompt)), prompt)
+                for resp, _, prompt in trie_scores
+            ]
+            surf_scores.sort(key=lambda x: x[1], reverse=True)
+            return [(resp, surf) for resp, surf, _ in surf_scores[:top_k]]
+
+        return [(resp, sim) for resp, sim, _ in trie_scores[:top_k]]
 
     # ── utilities ─────────────────────────────────────────────────────────────
 

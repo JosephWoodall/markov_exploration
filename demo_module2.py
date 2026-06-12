@@ -7,8 +7,9 @@ Run:
     python demo_module2.py
 """
 
-from predictor import UniversalPredictor
-from module2   import GoalDirectedGenerator, SEPARATOR, END
+from predictor  import UniversalPredictor
+from module2    import GoalDirectedGenerator, SEPARATOR, END
+from similarity import jaccard
 
 # ── dataset ───────────────────────────────────────────────────────────────────
 
@@ -80,7 +81,7 @@ NOVEL_PAIRS = [                  # tokens never seen in training
 def exact_match(got: list, expected: list) -> bool:
     return got == expected or (got and got[0] == expected[0])
 
-def run_accuracy(gen, pairs, strategy, beam_width=3, repeats_label=""):
+def run_accuracy(gen, pairs, strategy, beam_width=3, surface_sim_fn=None):
     correct = 0
     results = []
     for prompt, expected in pairs:
@@ -93,7 +94,8 @@ def run_accuracy(gen, pairs, strategy, beam_width=3, repeats_label=""):
             )
             got = beams[0][0] if beams else []
         elif strategy == "retrieve":
-            hits = gen.retrieve(prompt, TRAIN_PAIRS, top_k=1)
+            hits = gen.retrieve(prompt, TRAIN_PAIRS, top_k=1,
+                                surface_sim_fn=surface_sim_fn)
             got  = list(hits[0][0]) if hits else []
         else:
             got = []
@@ -150,15 +152,21 @@ def main():
 
     # ── benchmark: novel tokens ───────────────────────────────────────────────
     print("\n  Novel tokens (Egypt, oxygen, Uranus — never seen during training):")
-    acc_n_auto, res_auto = run_accuracy(gen, NOVEL_PAIRS, "auto")
-    acc_n_ret,  res_ret  = run_accuracy(gen, NOVEL_PAIRS, "retrieve")
-    print(f"  Autoregressive: {acc_n_auto*100:.0f}%   Retrieval: {acc_n_ret*100:.0f}%  "
-          f"(graceful degradation — falls back to root unigram)")
-    for (prompt, expected, got, hit), (_, _, got_r, hit_r) in zip(res_auto, res_ret):
+    print("  Three retrieval modes: trie-only | trie + Jaccard fallback | autoregressive")
+    acc_n_auto, res_auto   = run_accuracy(gen, NOVEL_PAIRS, "auto")
+    acc_n_ret,  res_ret    = run_accuracy(gen, NOVEL_PAIRS, "retrieve")
+    acc_n_surf, res_surf   = run_accuracy(gen, NOVEL_PAIRS, "retrieve",
+                                          surface_sim_fn=jaccard)
+    print(f"  Autoregressive: {acc_n_auto*100:.0f}%   "
+          f"Trie-only: {acc_n_ret*100:.0f}%   "
+          f"Trie+Jaccard: {acc_n_surf*100:.0f}%")
+    for (prompt, expected, got_a, hit_a), (_, _, got_r, hit_r), (_, _, got_s, hit_s) \
+            in zip(res_auto, res_ret, res_surf):
         q = " ".join(prompt)
-        print(f"  auto={'OK' if hit else '--'} [{got[0] if got else '?':10s}]  "
-              f"ret={'OK' if hit_r else '--'} [{got_r[0] if got_r else '?':10s}]  "
-              f"want={expected}   {q!r}")
+        print(f"  auto={'OK' if hit_a else '--'} [{got_a[0] if got_a else '?':10s}]  "
+              f"trie={'OK' if hit_r else '--'} [{got_r[0] if got_r else '?':10s}]  "
+              f"surf={'OK' if hit_s else '--'} [{got_s[0] if got_s else '?':10s}]  "
+              f"want={expected[0]!r}  {q!r}")
 
     # ── beam search detail ────────────────────────────────────────────────────
     print("\n[4/4] Beam search — top candidate first-tokens for two queries")
@@ -191,20 +199,21 @@ def main():
     print("""
   In-distribution (seen prompts):
     All three strategies achieve near-100% exact match.
-    Retrieval uses Bhattacharyya similarity on post-SEP distributions;
-    sim=1.0 means the trie perfectly discriminates every trained prompt.
+    Trie retrieval: Bhattacharyya ≈ 1.0 against the correct match,
+    near 0 against all others — the trie perfectly discriminates.
 
-  Novel tokens (e.g. 'Egypt', 'oxygen', 'Uranus'):
-    Autoregressive falls back to the most frequent answer in training.
-    Retrieval compares at the post-SEP context; novel tokens cause
-    fallback to shallow contexts, so it guesses from similar-structure
-    questions (same domain template).
+  Novel tokens (e.g. 'Egypt', 'oxygen', 'Uranus') — two stages:
+    Stage 1 (trie): novel token → root unigram fallback → all training
+    prompts score similarly low. Returns a random training answer.
+    Stage 2 (Jaccard fallback, triggered when Bhattacharyya < 0.5):
+    re-ranks by token overlap. 'capital of Egypt' → highest Jaccard
+    with other 'capital of X' questions → domain-correct city name,
+    even though the specific answer (cairo) was never seen.
 
-  Key takeaway:
-    Module 2 demonstrates perfect recall on trained Q&A and structured
-    generalization within known templates.  Handling genuinely novel
-    tokens requires embedding-based similarity (planned) rather than
-    exact-match trie lookup.
+  Degradation tiers:
+    Bhattacharyya ≈ 1.0  → exact trie match, perfect answer
+    Bhattacharyya < 0.5  → Jaccard fallback, domain-correct answer
+    No structural overlap → root unigram, random answer
 """)
 
 

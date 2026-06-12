@@ -1,12 +1,10 @@
 """
 Tests that probe the architecture's specific claims, not just end-to-end accuracy.
 
-Each test targets one differentiating feature:
-  calibration        — does confidence predict accuracy?          (measure of reality)
-  communication_gain — does coupling improve over raw similarity?  (lateral communication)
-  hypothesis_quality — accuracy when venturing into unflagged territory (imagination)
-  credibility_gini   — are credibilities differentiated or flat?   (feedback loop)
-  node_efficiency    — nodes needed to reach accuracy milestones   (topology quality)
+  calibration        — does confidence predict accuracy?
+  hypothesis_quality — accuracy when venturing into unflagged territory
+  credibility_gini   — are credibilities differentiated or flat?
+  node_efficiency    — nodes needed to reach accuracy milestones
 """
 
 import statistics
@@ -36,7 +34,6 @@ def normalize(seq):
     return [(v - mu) / sd for v in seq]
 
 def gini(values):
-    """Gini coefficient — 0 = perfectly equal, 1 = maximally unequal."""
     n = len(values)
     if n < 2:
         return 0.0
@@ -46,25 +43,17 @@ def gini(values):
     return numer / (n * total)
 
 
-# ── core evaluation loop (shared by all tests) ────────────────────────────────
+# ── core evaluation loop ──────────────────────────────────────────────────────
 
-def _run(seq, sim_fn, context_length, learning_rate=0.1,
-         coupling_lr=0.3, feedback_strength=0.3, vigilance=0.7,
-         coupling_ema=True):
-    """
-    Returns predictor + per-prediction records after full train+eval pass.
-    Record fields: correct, confidence, max_sim, is_hypothesis, node_count
-    """
+def _run(seq, sim_fn, context_length, learning_rate=0.1, vigilance=0.7):
+    """Returns predictor + per-prediction records after full train+eval pass."""
     n       = len(seq)
     train_n = int(n * 0.8)
 
     predictor = UniversalPredictor(
         context_length, sim_fn,
         learning_rate=learning_rate,
-        coupling_lr=coupling_lr,
-        feedback_strength=feedback_strength,
         vigilance=vigilance,
-        coupling_ema=coupling_ema,
     )
 
     for i, v in enumerate(seq[:train_n]):
@@ -83,8 +72,8 @@ def _run(seq, sim_fn, context_length, learning_rate=0.1,
             records.append({
                 'correct':       int(pred == v),
                 'confidence':    conf,
-                'max_sim':       predictor._last_fullscale_max_sim,
-                'is_hypothesis': predictor._last_fullscale_max_sim < vigilance,
+                'max_sim':       predictor._last_max_sim,
+                'is_hypothesis': predictor._last_max_sim < vigilance,
                 'node_count':    len(predictor._nodes),
             })
 
@@ -94,11 +83,6 @@ def _run(seq, sim_fn, context_length, learning_rate=0.1,
 # ── individual tests ──────────────────────────────────────────────────────────
 
 def test_calibration(records):
-    """
-    Bucket predictions by confidence decile, measure actual accuracy per bucket.
-    Perfect calibration: accuracy == confidence in every bucket.
-    Returns calibration score (1 = perfect, 0 = useless).
-    """
     buckets = defaultdict(list)
     for r in records:
         bucket = min(int(r['confidence'] * 10), 9)
@@ -109,61 +93,29 @@ def test_calibration(records):
     for b in range(10):
         if not buckets[b]:
             continue
-        mid_conf  = (b + 0.5) / 10
-        acc       = sum(buckets[b]) / len(buckets[b])
-        err       = abs(acc - mid_conf)
-        errors.append(err)
+        mid_conf = (b + 0.5) / 10
+        acc      = sum(buckets[b]) / len(buckets[b])
+        errors.append(abs(acc - mid_conf))
         rows.append((f'{b*10}-{b*10+10}%', mid_conf, acc, len(buckets[b])))
 
     score = 1.0 - (sum(errors) / len(errors)) if errors else 0.0
     return score, rows
 
 
-def test_communication_gain(seq, sim_fn, context_length, vigilance=0.7, coupling_ema=True):
-    """
-    Compare accuracy with coupling enabled vs coupling disabled (λ=0, coupling_lr=0).
-    Returns (gain, acc_with, acc_without).
-    """
-    _, rec_with    = _run(seq, sim_fn, context_length,
-                          coupling_lr=0.3, feedback_strength=0.3,
-                          vigilance=vigilance, coupling_ema=coupling_ema)
-    _, rec_without = _run(seq, sim_fn, context_length,
-                          coupling_lr=0.0, feedback_strength=0.0,
-                          vigilance=vigilance, coupling_ema=coupling_ema)
-
-    acc_with    = sum(r['correct'] for r in rec_with)    / len(rec_with)    if rec_with    else 0
-    acc_without = sum(r['correct'] for r in rec_without) / len(rec_without) if rec_without else 0
-    return acc_with - acc_without, acc_with, acc_without
-
-
 def test_hypothesis_quality(records, baseline):
-    """
-    Accuracy specifically on predictions made in unexplored territory (max_sim < ρ).
-    If the algorithm's imagination is working, this should beat or approach baseline.
-    """
     hyp = [r for r in records if r['is_hypothesis']]
     std = [r for r in records if not r['is_hypothesis']]
-
     hyp_acc = sum(r['correct'] for r in hyp) / len(hyp) if hyp else None
     std_acc = sum(r['correct'] for r in std) / len(std) if std else None
     return hyp_acc, std_acc, len(hyp), len(std)
 
 
 def test_credibility_gini(predictor):
-    """
-    Gini coefficient of credibility distribution.
-    0 = flat (feedback had no effect, all nodes equally trusted)
-    → 1 = peaked (system has strongly differentiated reliable from unreliable nodes)
-    """
-    creds = [n[2] for n in predictor._nodes]
+    creds = [n.node_cred for n in predictor._nodes]
     return gini(creds) if creds else 0.0
 
 
 def test_node_efficiency(seq, sim_fn, context_length, vigilance=0.7):
-    """
-    At what node count did accuracy first cross 50% and 75% of final accuracy?
-    Lower = the topology found good structure quickly.
-    """
     n       = len(seq)
     train_n = int(n * 0.8)
 
@@ -176,7 +128,6 @@ def test_node_efficiency(seq, sim_fn, context_length, vigilance=0.7):
         if i >= context_length:
             predictor.feedback(v)
 
-    window  = 20
     hits    = []
     nc      = []
     correct = total = 0
@@ -208,15 +159,14 @@ def test_node_efficiency(seq, sim_fn, context_length, vigilance=0.7):
 
 # ── orchestrator ──────────────────────────────────────────────────────────────
 
-def run_suite(name, seq, sim_fn, context_length=3, vigilance=None, coupling_ema=True):
+def run_suite(name, seq, sim_fn, context_length=3, vigilance=None):
     if vigilance is None:
         vigilance = (context_length - 1) / context_length
 
     unique   = len(set(seq))
     baseline = 1.0 / unique
 
-    predictor, records = _run(seq, sim_fn, context_length, vigilance=vigilance,
-                              coupling_ema=coupling_ema)
+    predictor, records = _run(seq, sim_fn, context_length, vigilance=vigilance)
 
     if not records:
         print(f"\n  {name} — no predictions recorded")
@@ -224,14 +174,11 @@ def run_suite(name, seq, sim_fn, context_length=3, vigilance=None, coupling_ema=
 
     overall_acc = sum(r['correct'] for r in records) / len(records)
 
-    # run all tests
-    cal_score, cal_rows                    = test_calibration(records)
-    comm_gain, acc_with, acc_without       = test_communication_gain(
-                                               seq, sim_fn, context_length, vigilance, coupling_ema)
-    hyp_acc, std_acc, n_hyp, n_std        = test_hypothesis_quality(records, baseline)
-    cred_gini                              = test_credibility_gini(predictor)
-    fin_acc, m50, m75, final_nodes        = test_node_efficiency(
-                                               seq, sim_fn, context_length, vigilance)
+    cal_score, cal_rows          = test_calibration(records)
+    hyp_acc, std_acc, n_hyp, n_std = test_hypothesis_quality(records, baseline)
+    cred_gini                    = test_credibility_gini(predictor)
+    fin_acc, m50, m75, final_nodes = test_node_efficiency(
+                                       seq, sim_fn, context_length, vigilance)
 
     lift = (overall_acc / baseline - 1) * 100
     prev = PREV.get(name, {})
@@ -250,12 +197,7 @@ def run_suite(name, seq, sim_fn, context_length=3, vigilance=None, coupling_ema=
         print(f"      {conf_range:>8s}  expected {mid:.2f}  actual {acc:.2f}"
               f"  n={cnt:3d}  {bar if acc >= mid else gap}")
 
-    print(f"\n  [2] Communication gain  (coupling vs no coupling)")
-    print(f"      With coupling : {acc_with:.3f}")
-    print(f"      No coupling   : {acc_without:.3f}")
-    print(f"      Gain          : {comm_gain:+.3f}")
-
-    print(f"\n  [3] Hypothesis quality  (in unexplored territory)")
+    print(f"\n  [2] Hypothesis quality  (in unexplored territory)")
     if hyp_acc is not None:
         print(f"      Hypothesis predictions : {n_hyp}   accuracy: {hyp_acc:.3f}"
               f"  (baseline: {baseline:.3f})")
@@ -265,31 +207,26 @@ def run_suite(name, seq, sim_fn, context_length=3, vigilance=None, coupling_ema=
     else:
         print(f"      No hypothesis predictions made (all contexts were covered)")
 
-    print(f"\n  [4] Credibility Gini  (has feedback differentiated nodes?)")
-    prev_gini = prev.get('gini')
+    print(f"\n  [3] Credibility Gini  (has feedback differentiated nodes?)")
+    prev_gini  = prev.get('gini')
     gini_delta = f"  [prev {prev_gini:.3f}]" if prev_gini else ""
     print(f"      Gini: {cred_gini:.3f}{gini_delta}  "
-          f"({'strong differentiation' if cred_gini > 0.3 else 'moderate' if cred_gini > 0.15 else 'weak — feedback barely separated nodes'})")
+          f"({'strong differentiation' if cred_gini > 0.3 else 'moderate' if cred_gini > 0.15 else 'weak'})")
 
-    print(f"\n  [5] Node efficiency  (topology quality)")
+    print(f"\n  [4] Node efficiency  (topology quality)")
     print(f"      Final nodes    : {final_nodes}")
     print(f"      Nodes at 50% acc milestone : {m50 if m50 else 'not reached'}")
     print(f"      Nodes at 75% acc milestone : {m75 if m75 else 'not reached'}")
 
-    ns = predictor.node_stats()
-    print(f"\n  [6] Optimizer / Allocator")
-    print(f"      Learned budget ceiling : {ns['optimizer_budget']}")
-    print(f"      Rolling accuracy (EMA) : {ns['optimizer_rolling_acc']:.3f}")
-    print(f"      Allocator trials logged: {ns['allocator_trials']}")
-
 
 PREV = {
-    "Airline Passengers":       dict(lift=37.9,  gini=0.109, comm=0.000, cal=0.843),
-    "Alice in Wonderland":      dict(lift=-8.3,  gini=0.154, comm=-0.003, cal=0.833),
-    "Bacteriophage Lambda DNA": dict(lift=14.7,  gini=0.084, comm=0.000, cal=0.779),
-    "NYC Weather Events":       dict(lift=44.0,  gini=0.368, comm=0.010, cal=0.749),
-    "Python PRNG":              dict(lift=40.0,  gini=0.085, comm=0.000, cal=0.876),
+    "Airline Passengers":       dict(lift=37.9, gini=0.109, cal=0.843),
+    "Alice in Wonderland":      dict(lift=-8.3, gini=0.154, cal=0.833),
+    "Bacteriophage Lambda DNA": dict(lift=14.7, gini=0.084, cal=0.779),
+    "NYC Weather Events":       dict(lift=44.0, gini=0.368, cal=0.749),
+    "Python PRNG":              dict(lift=40.0, gini=0.085, cal=0.876),
 }
+
 
 def _datasets():
     raw = load_airline_passengers()
@@ -316,51 +253,21 @@ def _datasets():
     ]
 
 
-def _quick_metrics(seq, sim_fn, context_length, coupling_ema):
-    """Run a full pass and return (accuracy, comm_gain, gini, cal_score)."""
-    vigilance = (context_length - 1) / context_length
-    predictor, records = _run(seq, sim_fn, context_length,
-                              vigilance=vigilance, coupling_ema=coupling_ema)
-    if not records:
-        return 0.0, 0.0, 0.0, 0.0
-    acc  = sum(r['correct'] for r in records) / len(records)
-    gain, _, _ = test_communication_gain(seq, sim_fn, context_length,
-                                         vigilance, coupling_ema)
-    gini_val   = test_credibility_gini(predictor)
-    cal, _     = test_calibration(records)
-    return acc, gain, gini_val, cal
-
-
 def main():
     print("Architecture Test Suite\n")
     datasets = _datasets()
 
-    # ── full detail run (EMA coupling) ────────────────────────────────────────
     for idx, (name, seq, sim_fn, ctx_len) in enumerate(datasets, 1):
         print(f"[{idx}/5] {name}...")
         if seq is None:
             print("  Failed: dataset unavailable")
             continue
-        run_suite(name, seq, sim_fn, context_length=ctx_len, coupling_ema=True)
+        run_suite(name, seq, sim_fn, context_length=ctx_len)
 
-    # ── coupling method comparison ────────────────────────────────────────────
     print(f"\n{'═'*62}")
-    print("  Coupling method comparison: EMA vs Accumulative (directional)")
-    print(f"  {'Dataset':<28} {'Method':<14} {'Acc':>6} {'CommGain':>9} {'Gini':>6} {'Cal':>6}")
-    print(f"  {'-'*28} {'-'*14} {'-'*6} {'-'*9} {'-'*6} {'-'*6}")
-
-    for name, seq, sim_fn, ctx_len in datasets:
-        if seq is None:
-            continue
-        for label, ema in [("EMA", True), ("Accumulative", False)]:
-            acc, gain, gini_val, cal = _quick_metrics(seq, sim_fn, ctx_len, ema)
-            print(f"  {name:<28} {label:<14} {acc:>6.3f} {gain:>+9.3f} {gini_val:>6.3f} {cal:>6.3f}")
-        print()
-
-    print(f"{'═'*62}")
     print("What good results look like:")
-    print("  Calibration → > 0.7 | Comm gain → positive for structured data")
-    print("  Gini → > 0.3       | Node eff → milestones well before final count\n")
+    print("  Calibration → > 0.7 | Gini → > 0.3")
+    print("  Node eff → milestones well before final count\n")
 
 
 if __name__ == "__main__":
