@@ -69,17 +69,36 @@ class UniversalPredictor:
         learning_rate: float = 0.1,
         vigilance: float = 0.5,
         min_context_length: int = 1,
+        min_confidence: float = 0.0,
+        adaptive_cap: bool = False,
+        cont_count_min_vocab: int = 8,
+        binary_correction_scale: float | None = None,
         **kwargs,   # absorb legacy args (coupling_lr, feedback_strength, etc.)
     ):
-        self.k         = context_length   # also exposed as max_k property
-        self.min_k     = max(1, min_context_length)
-        self.lr        = learning_rate
-        self.vigilance = vigilance
-        self._surface_sim = similarity_fn   # kept for API compat with forest
+        self.k              = context_length   # also exposed as max_k property
+        self.min_k          = max(1, min_context_length)
+        self.lr             = learning_rate
+        self.vigilance      = vigilance
+        self.min_confidence = min_confidence        # abstain if max(blend) < this × (1/|vocab|)
+        self._adaptive_cap  = adaptive_cap          # allow CRED_MAX to grow with node observations
+        self._cc_min_vocab  = cont_count_min_vocab  # V threshold for cont-count seed
+        # For binary streams (V≤2), full in-trie correction causes false-flip cascades
+        # after genuine transitions.  Scaling the boost reduces this at the cost of
+        # slightly slower cold-start on any other stream that passes through V=2.
+        # Only effective for V≤2; V≥3 always gets the full boost.
+        self._binary_corr_scale = binary_correction_scale
+        self._surface_sim   = similarity_fn         # kept for API compat with forest
 
         self._root:  _TrieNode      = _TrieNode()
         self.history: list[Any]     = []
         self._vocab:  set           = set()
+
+        # Continuation-count unigram (KN-style):
+        # _cont_counts[w] = number of distinct 1-gram predecessors u such that
+        # bigram (u, w) has been seen at least once.  Used as the seed
+        # distribution in _blend() instead of raw KT counts.
+        self._cont_counts: dict = {}
+        self._seen_bigrams: set = set()
 
         # predict() → feedback() state
         self._last_prediction:    Any   = None
@@ -87,6 +106,7 @@ class UniversalPredictor:
         self._last_context:       list  = []
         self._last_max_sim:       float = 0.0
         self._last_contributions: dict  = {}   # depth → (node_cred, top_successor)
+        self._last_abstained:     bool  = False
 
         # Backward-compat stubs (coupling removed; ablation showed ~0 effect)
         self.coupling:          dict  = {}
@@ -114,23 +134,45 @@ class UniversalPredictor:
         conf = dist[pred]
 
         self._last_distribution  = dist
-        self._last_prediction    = pred
         self._last_max_sim       = max((n.node_cred for n, _ in active), default=0.0)
         self._last_contributions = {
             d: (n.node_cred,
                 max(n.succ_cred, key=n.succ_cred.get) if n.succ_cred else pred)
             for n, d in active
         }
+
+        # Abstain when confidence is below the threshold (expressed as a
+        # multiple of the uniform baseline 1/|vocab|).  A factor of 1.5 means
+        # "only predict when at least 1.5× more confident than random".
+        # Does NOT change learning: feedback() still updates the trie.
+        if self.min_confidence > 0.0:
+            V = len(self._vocab)
+            if conf * V < self.min_confidence:
+                self._last_prediction = None
+                self._last_abstained  = True
+                return None, conf
+
+        self._last_prediction = pred
+        self._last_abstained  = False
         return pred, conf
 
     def feedback(self, actual: Any) -> None:
         self._vocab.add(actual)
-        n_hist  = len(self.history)
-        correct = (self._last_prediction == actual)
+        n_hist    = len(self.history)
+        abstained = self._last_abstained
+        correct   = (not abstained) and (self._last_prediction == actual)
 
-        # Root stores raw unigram counts — provides KT seed for blend
+        # Root stores raw unigram counts (kept for fallback during cold start)
         self._root.succ_cred[actual] = self._root.succ_cred.get(actual, 0) + 1.0
         self._root.n_obs += 1
+
+        # Continuation-count update: when a new bigram (prev, actual) is first
+        # seen, increment the continuation count for actual.
+        if len(self.history) >= 2:
+            bigram = (self.history[-2], actual)
+            if bigram not in self._seen_bigrams:
+                self._seen_bigrams.add(bigram)
+                self._cont_counts[actual] = self._cont_counts.get(actual, 0) + 1
 
         # Per-depth context nodes (depths min_k .. k)
         for d in range(self.min_k, min(self.k, n_hist - 1) + 1):
@@ -142,7 +184,9 @@ class UniversalPredictor:
             if actual not in node.succ_cred:
                 node.succ_cred[actual] = 1.0
 
-            if correct:
+            if abstained:
+                self._update_node_abstained(node, actual)
+            elif correct:
                 self._update_node_correct(node, actual)
             else:
                 self._update_node_wrong(node, self._last_prediction, actual)
@@ -154,22 +198,38 @@ class UniversalPredictor:
     # ── hooks for subclass ablation ───────────────────────────────────────────
 
     def _update_node_correct(self, node: _TrieNode, actual: Any) -> None:
-        node.succ_cred[actual] = min(_CRED_MAX, node.succ_cred[actual] * (1 + self.lr))
-        node.node_cred         = min(_CRED_MAX, node.node_cred         * (1 + self.lr))
+        cap = self._effective_cred_max(node)
+        node.succ_cred[actual] = min(cap, node.succ_cred[actual] * (1 + self.lr))
+        node.node_cred         = min(cap, node.node_cred         * (1 + self.lr))
+
+    def _update_node_abstained(self, node: _TrieNode, actual: Any) -> None:
+        if actual not in node.succ_cred:
+            node.succ_cred[actual] = 1.0
+        cap = self._effective_cred_max(node)
+        node.succ_cred[actual] = min(cap, node.succ_cred[actual] * (1 + self.lr))
 
     def _update_node_wrong(self, node: _TrieNode, predicted: Any, actual: Any) -> None:
-        # Confidence-proportional degradation: the more a node was trusted,
-        # the more aggressively it should lose that trust when wrong.
+        cap = self._effective_cred_max(node)
         # lr_down scales from lr (fresh node) to 2×lr (maximally trusted node).
-        # This halves adaptation lag for high-credibility nodes after a drift.
-        lr_down = self.lr * (1.0 + node.node_cred / _CRED_MAX)
+        lr_down = self.lr * (1.0 + node.node_cred / cap)
         if predicted is not None and predicted in node.succ_cred:
             node.succ_cred[predicted] = max(_CRED_MIN,
                 node.succ_cred[predicted] * (1 - lr_down))
-        # In-trie correction: immediately boost correct successor
-        node.succ_cred[actual] = min(_CRED_MAX,
-            node.succ_cred.get(actual, 1.0) * (1 + self.lr))
+        # In-trie correction: immediately boost correct successor.
+        # For binary streams (V≤2), reduce the boost to limit false-flip cascades
+        # after genuine transitions.  V≥3 always gets full correction.
+        if self._binary_corr_scale is not None and len(self._vocab) <= 2:
+            eff_boost = self.lr * self._binary_corr_scale
+        else:
+            eff_boost = self.lr
+        node.succ_cred[actual] = min(cap,
+            node.succ_cred.get(actual, 1.0) * (1 + eff_boost))
         node.node_cred = max(_CRED_MIN, node.node_cred * (1 - lr_down))
+
+    def _effective_cred_max(self, node: _TrieNode) -> float:
+        if not self._adaptive_cap:
+            return _CRED_MAX
+        return _CRED_MAX * (1.0 + 0.5 * math.log(1.0 + node.n_obs / 100.0))
 
     def _blend_lambda(self, node_cred: float) -> float:
         """CTW-style mixing coefficient. Override to disable credibility effect."""
@@ -221,12 +281,23 @@ class UniversalPredictor:
         V     = len(self._vocab)
         alpha = 0.5 / V    # Krichevsky-Trofimov prior
 
-        # Seed: KT-smoothed unigram from root counts
-        root_total = sum(self._root.succ_cred.values()) or 1.0
-        blended = {
-            s: (self._root.succ_cred.get(s, 0) + alpha) / (root_total + alpha * V)
-            for s in self._vocab
-        }
+        # Seed: continuation-count unigram (KN-style) for |V| >= cont_count_min_vocab.
+        # Uses how many distinct 1-gram predecessors each symbol appeared after,
+        # rather than raw frequency.  Better calibrated for diverse vocabularies
+        # (text ~26+, Airline 8 bins).  Threshold keeps small alphabets
+        # (DNA=4, Electricity=2) on raw KT where cont-counts are too sparse.
+        cont_total = sum(self._cont_counts.values()) if self._cont_counts else 0
+        if V >= self._cc_min_vocab and cont_total > 0:
+            blended = {
+                s: (self._cont_counts.get(s, 0) + alpha) / (cont_total + alpha * V)
+                for s in self._vocab
+            }
+        else:
+            root_total = sum(self._root.succ_cred.values()) or 1.0
+            blended = {
+                s: (self._root.succ_cred.get(s, 0) + alpha) / (root_total + alpha * V)
+                for s in self._vocab
+            }
 
         by_depth = {d: n for n, d in active}
         for d in range(1, self.k + 1):
