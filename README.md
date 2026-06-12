@@ -129,7 +129,7 @@ Evaluated on 7 standard datasets (two large text corpora, full DNA genome) and 4
 | Airline passengers | 144 | 4 | 37.9 | 27.6 | 31.0 | **41.4** | **41.4** |
 | Alice in Wonderland (15K) | 15,000 | 6 | 2.8 | 51.6 | **53.3** | 51.7 | 51.9 |
 | Moby Dick (50K) | 50,000 | 6 | 2.1 | 45.7 | **47.4** | 46.2 | 46.1 |
-| DNA — bacteriophage lambda (full) | 48,502 | 5 | 26.1 | 29.7 | **30.7** | 29.2 | 28.0 |
+| DNA — bacteriophage lambda (full) | 48,502 | 5 | 26.1 | 29.7 | **30.7** | 29.1 | 28.0 |
 | Weather | 547 | 3 | **57.3** | 47.3 | 50.0 | **52.7** | **51.8** |
 | PRNG (noise floor) | 500 | 3 | 10.0 | **18.0** | 16.0 | 15.0 | 13.0 |
 | Electricity (45K) | 45,312 | 4 | **84.8** | **84.8** | **84.8** | **84.7** | **84.6** |
@@ -154,7 +154,7 @@ Evaluated on 7 standard datasets (two large text corpora, full DNA genome) and 4
 | Airline passengers | 27.6 | 27.6 | 24.1 | 37.9 | **41.4** |
 | Alice in Wonderland (15K) | **52.8** | 51.8 | 39.9 | 51.7 | 51.9 |
 | Moby Dick (50K) | **47.2** | 45.3 | 38.6 | 46.2 | 46.1 |
-| DNA — bacteriophage lambda | 30.1 | 26.6 | **32.5** | 29.2 | 28.0 |
+| DNA — bacteriophage lambda | 30.1 | 26.6 | **32.5** | 29.1 | 28.0 |
 | Weather | 50.9 | 48.2 | 43.6 | **52.7** | **51.8** |
 | PRNG (noise floor) | 15.0 | **18.0** | 10.0 | 15.0 | 13.0 |
 | Electricity (45K) | **84.8** | 81.9 | **84.8** | **84.7** | **84.6** |
