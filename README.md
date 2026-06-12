@@ -1,6 +1,30 @@
 # Universal Sequence Predictor
 
-Online, instance-based sequence prediction. Given any stream of observations, it learns to predict what comes next — for any symbol type, in any domain — without assuming a fixed distribution, a known alphabet, or a stationary process.
+Online, instance-based sequence prediction. Given any stream of discrete observations, it learns to predict what comes next — for any symbol type, in any domain — without assuming a fixed distribution, a known alphabet, or a stationary process.
+
+---
+
+## What this is for
+
+**Its clearest domain: discrete event streams where the underlying pattern shifts over time.**
+
+If you have a stream of categorical states and need to predict the next one — without knowing in advance how the pattern will change — this is the right tool. It beats count-based methods (N-gram, PPM, CTW) and online neural methods specifically in non-stationary settings, and it does so with no retraining, no drift detector, and no forgetting window to tune.
+
+**Natural fits:**
+
+- **System observability** — sequences of log event codes, API call chains, process state transitions. Predicts next failure type. When a deployment changes the pattern, adaptation is automatic.
+- **User behavior** — clickstreams, navigation paths, in-app action sequences. Next-action prediction that updates on every new user event without a retraining cycle.
+- **Industrial / IoT** — machine state sequences (idle / running / warning / fault), energy consumption states, production line events. Works on tiny datasets where neural methods don't have enough data.
+- **Financial regimes** — discretized price movements, order flow states, market microstructure events. Handles regime shifts that break count-based models.
+- **Anomaly detection** — when the predictor is consistently wrong, something structurally unusual is happening. Confidence collapses before a human notices; no separate anomaly model needed.
+- **Game AI / opponent modeling** — predict next move in any discrete-action game. Adapts to opponent strategy shifts in real time.
+
+**Where it is not competitive:**
+
+- **Tabular classification with independent rows** — if your data is feature vectors with no meaningful temporal order, use gradient boosting. (A tabular extension via feature-as-sequence encoding is planned; see Roadmap.)
+- **Long-range sequence dependencies** — the context window is fixed at k. Anything requiring memory beyond the last k observations needs a transformer or RNN.
+- **Large stationary corpora** — on 50K tokens of text or DNA, count-based methods (CTW, KN) hold a 1–2pp accuracy advantage because their unbounded counts eventually outcompete the credibility cap. The gap closes on noisy or drifting data.
+- **Continuous regression targets without discretization** — native support requires binning the output. (Regression mode exists; see below.)
 
 ---
 
@@ -21,20 +45,22 @@ That is the entire algorithm. No drift detector, no forgetting parameter, no dom
 - `node_cred` — reliability of this context as a predictor overall
 - `n_obs` — number of times this context has been seen
 
-The root holds continuation counts (how many distinct predecessors each symbol appeared after, KN-style) for large vocabularies (|V|≥16), falling back to raw KT counts for small alphabets (DNA=4, Electricity=2) where continuation counts are too sparse. This seeds the blend with a better-calibrated unigram prior for text prediction.
+The root holds continuation counts (how many distinct predecessors each symbol appeared after, KN-style) for large vocabularies (|V|≥8), falling back to raw KT counts for small alphabets (DNA=4, Electricity=2) where continuation counts are too sparse. This seeds the blend with a better-calibrated unigram prior.
 
 **Prediction O(k):**
 
 Walk the trie at depths `min_k..k`. For each matching node, compute a KT-smoothed local distribution. Blend from shallow to deep using the CTW-style recursive formula:
 
 ```
-λ_d = node_cred_d / (node_cred_d + 1)
+λ_d = node_cred_d^p / (node_cred_d^p + 1)     # p=0.65; softened mixing weight
 P_d = λ_d · P_local(d)  +  (1 − λ_d) · P_{d−1}
 ```
 
 High credibility → λ → 1 → deep context dominates.
 Low credibility  → λ → 0 → falls back to shallow.
 Root provides the seed.
+
+The exponent `p=0.65` (versus the standard CTW value of p=1) lets shallower contexts retain 22% blend weight even when deeper contexts are fully saturated. This acts as implicit depth regularization — preventing rare deep contexts from monopolizing predictions on stationary data, without affecting drift adaptation (credibility degrades naturally under drift regardless of p).
 
 **Update O(k):**
 
@@ -51,9 +77,10 @@ wrong:    lr_down = lr × (1 + node_cred / cap)   # confidence-proportional
           node_cred ← max(C_MIN, node_cred × (1 − lr_down))
           succ_cred[wrong] ← max(C_MIN, succ_cred[wrong] × (1 − lr_down))
           succ_cred[actual] ← min(cap, succ_cred[actual] × (1 + lr))
+                               ×  binary_scale   # for V≤2 only; prevents false-flip cascades
 ```
 
-With `adaptive_cap=True`, nodes with many observations are allowed to build higher credibility — the cap grows logarithmically with `n_obs`, so λ can approach 1 more closely on stationary data while the maximum `lr_down = 2×lr` is preserved (because `lr_down` normalizes by `cap`, not `C_MAX`).
+With `adaptive_cap=True`, nodes with many observations are allowed to build higher credibility — the cap grows logarithmically with `n_obs`, so λ can approach 1 more closely on stationary data while the maximum `lr_down = 2×lr` is preserved.
 
 The `lr_down` scaling is the key drift-adaptation mechanism: a node that was highly trusted when it turned wrong loses credibility up to 2× faster than a fresh node. This halves the adaptation lag after a concept drift without requiring any drift detector.
 
@@ -108,14 +135,6 @@ Module 1 learns that SEPARATOR is followed by responses, not more prompts. No ar
 | **Beam search** | Maintain N candidate sequences; at each step expand by all vocabulary tokens; prune to top N by cumulative log-probability | Longer responses, controllable diversity |
 | **Retrieval** | Two-stage: (1) Bhattacharyya similarity on post-SEP trie distributions — exact for seen prompts; (2) surface Jaccard fallback when Bhattacharyya < 0.5 — domain-correct for novel tokens | Factual lookup; graceful degradation to novel inputs |
 
-**Retrieval degradation tiers:**
-
-| Bhattacharyya score | Signal | Response quality |
-|---|---|---|
-| ≈ 1.0 | Exact trie match | Correct answer |
-| < 0.5 (with Jaccard fallback) | Novel token → root unigram | Domain-correct (right type: capital city, symbol, etc.) |
-| No surface overlap | Root unigram, all prompts identical | Random training answer |
-
 ---
 
 ## Benchmark Results
@@ -143,15 +162,13 @@ Evaluated on 7 standard datasets (two large text corpora, full DNA genome) and 4
 | Recurring A→B→A | 3.8 | 3.3 | 4.2 | **97.5** | **97.5** |
 | Fast (150-step cycles) | 40.0 | 39.6 | 40.4 | **94.6** | 93.3 |
 
-**Log-loss — Predictor wins on Weather; nearly ties CTW on DNA. PPM-D wins on Alice and Moby Dick.**
-
----
+The concept-drift numbers are the clearest statement of what this architecture is for. Count-based methods (N-gram, PPM-D, CTW) never recover from a reversal because counts only accumulate. The Predictor recovers automatically.
 
 **Extended baseline comparison — KN, PPM\*, Online LSTM (test accuracy %):**
 
 | Dataset | KN(5) | PPM\*(20) | LSTM(64) | Predictor | Forest |
 |---|---|---|---|---|---|
-| Airline passengers | 27.6 | 27.6 | 24.1 | 37.9 | **41.4** |
+| Airline passengers | 27.6 | 27.6 | 24.1 | **41.4** | **41.4** |
 | Alice in Wonderland (15K) | **52.8** | 51.8 | 39.9 | 51.7 | 51.9 |
 | Moby Dick (50K) | **47.2** | 45.3 | 38.6 | 46.2 | 46.1 |
 | DNA — bacteriophage lambda | 30.1 | 26.6 | **32.5** | 29.1 | 28.0 |
@@ -161,15 +178,12 @@ Evaluated on 7 standard datasets (two large text corpora, full DNA genome) and 4
 
 KN(5) = Interpolated Kneser-Ney N-gram. PPM\*(20) = PPM with max order 20. LSTM(64) = single-layer LSTM, hidden size 64, trained online with BPTT-1 and Adam.
 
-**Key findings from the extended comparison:**
+**Key findings:**
 
-- **KN(5) is the strongest text predictor** (52.8% Alice, 47.2% Moby) — continuation-count backoff outperforms Laplace-smoothed N-gram and is competitive with CTW on natural language.
-- **Predictor leads on Weather** (51.8%) — KN continuation-count seeding, adaptive credibility cap (cred_max=6.05), and tuned lr (0.08) together lift Predictor from 48.2% to 51.8%, surpassing CTW (50.0%), KN (50.9%), Forest (50.9%), and PPM\*(48.2%).
-- **LSTM wins on DNA** (32.5%, +1.8pp over CTW) — neural sequence modeling captures long-range non-Markovian dependencies in genomic data that any fixed-order predictor misses.
-- **LSTM ties for best on Electricity** (84.8%) — converges cleanly for high-persistence binary streams after 36K training steps.
-- **PPM\*(20) ≤ PPM-D(5) on DNA and Electricity** — order-20 contexts are too sparse for available training data; extra depth adds noise rather than signal.
-- **Forest still dominates on Airline** (41.4%) — no counting-based or neural method comes close on short non-stationary time series.
-- **LSTM underperforms on text** (Alice 39.9%, Moby 38.6%) — online BPTT-1 provides insufficient gradient signal for 26-symbol character-level language modeling.
+- **Predictor leads on Weather and Airline** — short, noisy, non-stationary datasets where count-based methods overfit to stale patterns. No other method is competitive on Airline (n=144).
+- **KN(5) is the strongest text predictor** on large stationary corpora (52.8% Alice, 47.2% Moby). The credibility cap prevents our predictor from fully converging — a structural trade-off for drift recovery.
+- **LSTM wins on DNA** (32.5%) — neural sequence modeling captures long-range non-Markovian dependencies that any fixed-order predictor misses.
+- **Electricity: all methods tie** (84.6–84.8%) — a high-persistence binary stream where persistence itself is the ceiling.
 
 ---
 
@@ -177,9 +191,9 @@ KN(5) = Interpolated Kneser-Ney N-gram. PPM\*(20) = PPM with max order 20. LSTM(
 
 `UniversalPredictor` accepts a `min_confidence` parameter (default `0.0`). When set, the predictor abstains — returns `(None, conf)` — whenever its best prediction is less than `min_confidence × (1/|vocab|)` above the uniform baseline. A value of `1.5` means "only predict when at least 1.5× more confident than random."
 
-Abstaining does not penalize the node: `node_cred` is unchanged (abstaining is not a wrong prediction). The successor distribution still updates so learning continues. This makes the warmup period implicit — early steps where the predictor is near-uniform simply produce no output rather than noisy guesses.
+Abstaining does not penalize the node: `node_cred` is unchanged. The successor distribution still updates so learning continues. This makes the warmup period implicit — early steps where the predictor is near-uniform simply produce no output rather than noisy guesses.
 
-**Precision–coverage tradeoffs measured on natural language (Alice, k=4):**
+**Precision–coverage tradeoffs on natural language (Alice, k=4):**
 
 | min_confidence | Accuracy (predicted only) | Coverage | Lift |
 |---|---|---|---|
@@ -189,9 +203,7 @@ Abstaining does not penalize the node: `node_cred` is unchanged (abstaining is n
 | 5.0 | 59.4% | 77.6% | +10.9pp |
 | 6.0 | 61.4% | 71.8% | +12.9pp |
 
-The gain is real: predictions the model skips are genuinely its worst ones. Alice at min_conf=5.0 reaches 59.4% accuracy (vs CTW's 53.3% on 100% coverage) by only speaking when confident. For use cases where coverage matters less than per-prediction reliability, this is the correct mode.
-
-**Note on vocabulary size:** `min_confidence` is normalized by `1/|vocab|`, so the same value applies comparably across different alphabet sizes (4 symbols for DNA, 26 for text). Weather (5-symbol alphabet, near-uniform predictor) requires `min_confidence < 1.5` to produce any predictions.
+Alice at min_conf=5.0 reaches 59.4% accuracy (vs CTW's 53.3% on 100% coverage) by only speaking when confident. For anomaly detection or alerting use cases where coverage matters less than per-prediction reliability, this is the correct mode.
 
 ---
 
@@ -199,13 +211,31 @@ The gain is real: predictions the model skips are genuinely its worst ones. Alic
 
 Expanding from small samples to full datasets exposed a fundamental architectural property:
 
-**Data-limited regime (n ≲ 5K):** Credibility builds up quickly, blend weights become decisive, and the Predictor is competitive or best. At 1,500 DNA bases the Predictor was 33.0% — best across all methods.
+**Data-limited regime (n ≲ 800):** Credibility builds up quickly, blend weights become decisive, and the Predictor is competitive or best. At 1,500 DNA bases the Predictor was 33.0% — best across all methods.
 
-**Architecture-limited regime (n ≫ CRED_MAX/lr ≈ 80 steps to cap):** Every node hits `CRED_MAX=8.0` and the blend weight freezes at λ=8/9=0.889. Count-based methods (PPM-D, CTW) have no cap — their counts keep growing, giving predictions increasingly close to 1.0. At 48K DNA bases CTW reaches 30.7% while the Predictor drops to 26.2%.
+**Architecture-limited regime (n ≫ 800):** Every node hits `CRED_MAX` and the blend weight freezes at λ = cap^p/(cap^p+1). Count-based methods (PPM-D, CTW) have no cap — their counts keep growing, giving predictions increasingly close to 1.0. At 48K DNA bases CTW reaches 30.7% while the Predictor reaches 29.1%.
 
-**The exception is noisy and drifting data.** Weather improved from 41% to 51.8% with tuning — **the Predictor leads on Weather** (51.8% vs Forest 50.9%, KN 50.9%, CTW 50.0%). Noisy, high-variance datasets where count-based methods overfit to stale patterns are exactly the Predictor's domain. On all four drift streams the Predictor still dominates at 94–98% regardless of scale.
+**The exception is noisy and drifting data.** Weather improved from 41% to 52.7% — the Predictor leads on Weather because noisy, high-variance datasets are exactly where count-based methods overfit to stale patterns.
 
-**The CRED_MAX cap is a design choice, not a bug.** A node with unbounded credibility would adapt from drift in O(n) steps. The cap guarantees O(1/CRED_MAX) adaptation speed: a maximally-trusted node that turns wrong loses credibility at 2× the base rate (confidence-proportional degradation). The trade-off is explicit: fast drift recovery at the cost of long-term convergence on stationary data.
+**The CRED_MAX cap is a design choice, not a bug.** A node with unbounded credibility would adapt from drift in O(n) steps. The cap guarantees O(1/CRED_MAX) adaptation speed. The trade-off is explicit: fast drift recovery at the cost of long-term convergence on stationary data.
+
+---
+
+## Roadmap
+
+The current architecture handles discrete sequence prediction. The planned extensions, in order:
+
+**1. Tabular classification (next)**
+
+Convert tabular rows to sequences via feature-as-sequence encoding: each feature value becomes a token, the label is the last token. A discretization layer handles continuous inputs. Feature ordering by mutual information with the label recovers decision-tree-quality accuracy on structured data while inheriting online updating and drift robustness.
+
+**2. Continuous multivariate time series**
+
+Replace exact trie lookup with approximate nearest-neighbor matching using the existing similarity function infrastructure. Allows continuous-valued observations without discretization. Compound tuple tokens (one per time step, all features together) are already supported for discrete multivariate inputs.
+
+**3. Regression**
+
+Regression mode already exists in `PredictorForest` (`task='regression'`). The extension is output discretization: bin the continuous target at training time, output credibility-weighted mean of bin centers at inference time. The predictive distribution over bins provides calibrated uncertainty estimates.
 
 ---
 
@@ -239,5 +269,6 @@ Expanding from small samples to full datasets exposed a fundamental architectura
 | Concept drift recovery | Requires reset or windowing | Requires reset or windowing | Self-correcting; speed proportional to prior confidence |
 | Node count | O(V^k) worst case | O(V^k) worst case | O(sequence length) — only observed contexts |
 | Online adaptation | Counts update, predictions sharpen | Weights update | Credibility update; fresh vs. stale nodes naturally separated |
+| Small dataset behavior | Overtrusts rare k-grams | Overtrusts rare k-grams | Credibility builds slowly on sparse observations |
 
 The single deepest difference from count-based methods: **credibility is earned and can be lost.** A context that was reliable on Monday and wrong on Tuesday sees its influence reduced on Wednesday. Counts only accumulate.
