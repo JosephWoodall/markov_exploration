@@ -74,6 +74,7 @@ class UniversalPredictor:
         cont_count_min_vocab: int = 8,
         binary_correction_scale: float | None = None,
         cred_max: float = 8.0,
+        lambda_power: float = 1.0,
         **kwargs,   # absorb legacy args (coupling_lr, feedback_strength, etc.)
     ):
         self.k              = context_length   # also exposed as max_k property
@@ -89,6 +90,10 @@ class UniversalPredictor:
         # slightly slower cold-start on any other stream that passes through V=2.
         # Only effective for V≤2; V≥3 always gets the full boost.
         self._binary_corr_scale = binary_correction_scale
+        # Softens the credibility→mixing-weight mapping: λ = cred^p / (cred^p + 1).
+        # p=1 is the standard CTW formula; p<1 lets shallower contexts retain more
+        # influence even at high credibility, acting as implicit depth regularization.
+        self._lambda_power  = lambda_power
         self._surface_sim   = similarity_fn         # kept for API compat with forest
 
         self._root:  _TrieNode      = _TrieNode()
@@ -235,7 +240,10 @@ class UniversalPredictor:
 
     def _blend_lambda(self, node_cred: float) -> float:
         """CTW-style mixing coefficient. Override to disable credibility effect."""
-        return node_cred / (node_cred + 1.0)
+        if self._lambda_power == 1.0:
+            return node_cred / (node_cred + 1.0)
+        x = node_cred ** self._lambda_power
+        return x / (x + 1.0)
 
     def _feedback_get_node(self, ctx: tuple) -> _TrieNode | None:
         """Return (creating if needed) the node for ctx. Override for ablation."""
