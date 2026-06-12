@@ -73,6 +73,7 @@ class UniversalPredictor:
         adaptive_cap: bool = False,
         cont_count_min_vocab: int = 8,
         binary_correction_scale: float | None = None,
+        cred_max: float = 8.0,
         **kwargs,   # absorb legacy args (coupling_lr, feedback_strength, etc.)
     ):
         self.k              = context_length   # also exposed as max_k property
@@ -81,6 +82,7 @@ class UniversalPredictor:
         self.vigilance      = vigilance
         self.min_confidence = min_confidence        # abstain if max(blend) < this × (1/|vocab|)
         self._adaptive_cap  = adaptive_cap          # allow CRED_MAX to grow with node observations
+        self._cred_max_base = cred_max              # base credibility ceiling (8.0 = default)
         self._cc_min_vocab  = cont_count_min_vocab  # V threshold for cont-count seed
         # For binary streams (V≤2), full in-trie correction causes false-flip cascades
         # after genuine transitions.  Scaling the boost reduces this at the cost of
@@ -228,8 +230,8 @@ class UniversalPredictor:
 
     def _effective_cred_max(self, node: _TrieNode) -> float:
         if not self._adaptive_cap:
-            return _CRED_MAX
-        return _CRED_MAX * (1.0 + 0.5 * math.log(1.0 + node.n_obs / 100.0))
+            return self._cred_max_base
+        return self._cred_max_base * (1.0 + 0.5 * math.log(1.0 + node.n_obs / 100.0))
 
     def _blend_lambda(self, node_cred: float) -> float:
         """CTW-style mixing coefficient. Override to disable credibility effect."""

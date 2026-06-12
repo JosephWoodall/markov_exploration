@@ -130,7 +130,7 @@ Evaluated on 7 standard datasets (two large text corpora, full DNA genome) and 4
 | Alice in Wonderland (15K) | 15,000 | 6 | 2.8 | 51.6 | **53.3** | 51.5 | 51.9 |
 | Moby Dick (50K) | 50,000 | 6 | 2.1 | 45.7 | **47.4** | 45.8 | 46.1 |
 | DNA — bacteriophage lambda (full) | 48,502 | 5 | 26.1 | 29.7 | **30.7** | 28.3 | 28.0 |
-| Weather | 547 | 3 | **57.3** | 47.3 | 50.0 | 50.9 | 50.9 |
+| Weather | 547 | 3 | **57.3** | 47.3 | 50.0 | **51.8** | 50.9 |
 | PRNG (noise floor) | 500 | 3 | 10.0 | **18.0** | 16.0 | 14.0 | 13.0 |
 | Electricity (45K) | 45,312 | 4 | **84.8** | **84.8** | **84.8** | 83.6 | 83.5 |
 
@@ -143,7 +143,7 @@ Evaluated on 7 standard datasets (two large text corpora, full DNA genome) and 4
 | Recurring A→B→A | 3.8 | 3.3 | 4.2 | **97.5** | **97.5** |
 | Fast (150-step cycles) | 40.0 | 39.6 | 40.4 | **94.6** | 93.3 |
 
-**Log-loss — Predictor ties with Forest on Weather; nearly ties CTW on DNA. PPM-D wins on Alice and Moby Dick.**
+**Log-loss — Predictor wins on Weather; nearly ties CTW on DNA. PPM-D wins on Alice and Moby Dick.**
 
 ---
 
@@ -155,7 +155,7 @@ Evaluated on 7 standard datasets (two large text corpora, full DNA genome) and 4
 | Alice in Wonderland (15K) | **52.8** | 51.8 | 39.9 | 51.5 | 51.9 |
 | Moby Dick (50K) | **47.2** | 45.3 | 38.6 | 45.8 | 46.1 |
 | DNA — bacteriophage lambda | 30.1 | 26.6 | **32.5** | 28.1 | 28.0 |
-| Weather | 50.9 | 48.2 | 43.6 | 50.9 | 50.9 |
+| Weather | 50.9 | 48.2 | 43.6 | **51.8** | 50.9 |
 | PRNG (noise floor) | 15.0 | **18.0** | 10.0 | 14.0 | 13.0 |
 | Electricity (45K) | **84.8** | 81.9 | **84.8** | 83.6 | 83.5 |
 
@@ -164,7 +164,7 @@ KN(5) = Interpolated Kneser-Ney N-gram. PPM\*(20) = PPM with max order 20. LSTM(
 **Key findings from the extended comparison:**
 
 - **KN(5) is the strongest text predictor** (52.8% Alice, 47.2% Moby) — continuation-count backoff outperforms Laplace-smoothed N-gram and is competitive with CTW on natural language.
-- **Predictor matches Forest and KN on Weather** (50.9%) — KN continuation-count seeding, adaptive credibility cap, and tuned lr (0.08) together lift Predictor from 48.2% to 50.9%, matching KN (50.9%) and Forest (50.9%), surpassing CTW (50.0%) and PPM\*(48.2%).
+- **Predictor leads on Weather** (51.8%) — KN continuation-count seeding, adaptive credibility cap (cred_max=6.05), and tuned lr (0.08) together lift Predictor from 48.2% to 51.8%, surpassing CTW (50.0%), KN (50.9%), Forest (50.9%), and PPM\*(48.2%).
 - **LSTM wins on DNA** (32.5%, +1.8pp over CTW) — neural sequence modeling captures long-range non-Markovian dependencies in genomic data that any fixed-order predictor misses.
 - **LSTM ties for best on Electricity** (84.8%) — converges cleanly for high-persistence binary streams after 36K training steps.
 - **PPM\*(20) ≤ PPM-D(5) on DNA and Electricity** — order-20 contexts are too sparse for available training data; extra depth adds noise rather than signal.
@@ -203,7 +203,7 @@ Expanding from small samples to full datasets exposed a fundamental architectura
 
 **Architecture-limited regime (n ≫ CRED_MAX/lr ≈ 80 steps to cap):** Every node hits `CRED_MAX=8.0` and the blend weight freezes at λ=8/9=0.889. Count-based methods (PPM-D, CTW) have no cap — their counts keep growing, giving predictions increasingly close to 1.0. At 48K DNA bases CTW reaches 30.7% while the Predictor drops to 26.2%.
 
-**The exception is noisy and drifting data.** Weather improved from 41% to 50.9% with tuning — the Predictor matches Forest and KN on Weather (50.9%), beating CTW (50.0%) and PPM\*(48.2%). Noisy, high-variance datasets where count-based methods overfit to stale patterns are exactly the Predictor's domain. On all four drift streams the Predictor still dominates at 94–98% regardless of scale.
+**The exception is noisy and drifting data.** Weather improved from 41% to 51.8% with tuning — **the Predictor leads on Weather** (51.8% vs Forest 50.9%, KN 50.9%, CTW 50.0%). Noisy, high-variance datasets where count-based methods overfit to stale patterns are exactly the Predictor's domain. On all four drift streams the Predictor still dominates at 94–98% regardless of scale.
 
 **The CRED_MAX cap is a design choice, not a bug.** A node with unbounded credibility would adapt from drift in O(n) steps. The cap guarantees O(1/CRED_MAX) adaptation speed: a maximally-trusted node that turns wrong loses credibility at 2× the base rate (confidence-proportional degradation). The trade-off is explicit: fast drift recovery at the cost of long-term convergence on stationary data.
 

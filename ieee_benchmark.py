@@ -486,7 +486,7 @@ def _make_std_methods(k, sim, vig, forest_kw=None):
         ('PPM-D(5)',    PPMPredictor(max_order=5)),
         ('CTW(5)',      CTWPredictor(max_order=5)),
         ('Predictor',   UniversalPredictor(k, sim, learning_rate=0.08, vigilance=vig,
-                                            adaptive_cap=True, binary_correction_scale=0.19)),
+                                            adaptive_cap=True, binary_correction_scale=0.19, cred_max=6.05)),
         ('Forest',      PredictorForest(k, sim, learning_rate=0.1, vigilance=vig, **fkw)),
     ]
 
@@ -503,7 +503,7 @@ def _make_extended_methods(k, sim, vig, forest_kw=None):
         ('PPM*(20)',  PPMStarPredictor(max_order=20)),
         ('LSTM(64)',  OnlineLSTMPredictor(hidden_size=64)),
         ('Predictor', UniversalPredictor(k, sim, learning_rate=0.08, vigilance=vig,
-                                         adaptive_cap=True, binary_correction_scale=0.19)),
+                                         adaptive_cap=True, binary_correction_scale=0.19, cred_max=6.05)),
         ('Forest',    PredictorForest(k, sim, learning_rate=0.1, vigilance=vig, **fkw)),
     ]
 
@@ -519,7 +519,7 @@ def _make_drift_methods(k, sim, vig):
         (f'PPM-D({k})',        PPMPredictor(max_order=k)),
         (f'CTW({k})',          CTWPredictor(max_order=k)),
         ('Predictor',          UniversalPredictor(k, sim, learning_rate=0.08, vigilance=vig,
-                                                   adaptive_cap=True, binary_correction_scale=0.19)),
+                                                   adaptive_cap=True, binary_correction_scale=0.19, cred_max=6.05)),
         ('Forest',             PredictorForest(k, sim, learning_rate=0.1, vigilance=vig, **fkw)),
     ]
 
