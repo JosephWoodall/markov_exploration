@@ -472,7 +472,8 @@ def _time_and_nodes(method, seq: list) -> dict:
 _FOREST_BASE = dict(n_trees=5, dropout=0.2, stagger=25, voting='adaptive',
                     heterogeneous_k=True, tree_lr=0.1, max_trees=20,
                     auto_grow=True, auto_prune=True,
-                    grow_threshold=8, prune_window=50)
+                    grow_threshold=8, prune_window=50,
+                    binary_correction_scale=0.19)
 
 
 def _make_std_methods(k, sim, vig, forest_kw=None):

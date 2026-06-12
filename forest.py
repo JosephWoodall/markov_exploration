@@ -57,6 +57,7 @@ class PredictorForest:
         coupling_ema: bool = True,
         n_trees: int = 5,
         dropout: float = 0.2,
+        binary_correction_scale: float | None = None,
         seed: int = 42,
         voting: str = 'adaptive',
         heterogeneous_k: bool = True,
@@ -71,6 +72,7 @@ class PredictorForest:
         task: str = 'sequence',
     ):
         self.dropout        = dropout
+        self._tree_bcs      = binary_correction_scale
         self.voting         = voting
         self.tree_lr        = tree_lr
         self.task           = task
@@ -105,6 +107,8 @@ class PredictorForest:
                 learning_rate=learning_rate, coupling_lr=coupling_lr,
                 feedback_strength=feedback_strength, vigilance=vigilance,
                 min_context_length=min_context_length, coupling_ema=coupling_ema,
+                cont_count_min_vocab=16,
+                binary_correction_scale=binary_correction_scale,
             )
             for i in range(n_trees)
         ]
@@ -359,6 +363,8 @@ class PredictorForest:
                 learning_rate=self._lr, coupling_lr=self._coup_lr,
                 feedback_strength=self._fb_str, vigilance=self._vig,
                 min_context_length=self._min_k, coupling_ema=self._coup_ema,
+                cont_count_min_vocab=16,
+                binary_correction_scale=self._tree_bcs,
             )
         )
         self._rngs.append(random.Random(self._master_rng.randint(0, 2**32)))
