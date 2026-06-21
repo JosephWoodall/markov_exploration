@@ -422,8 +422,10 @@ class TabularGenerator(BaseEstimator):
 
         # A second predictor trained label-first enables class-conditional generation.
         # P(f0,...,fn-1 | label) is modelled correctly only when label precedes features.
+        # MI-descending order: most discriminative features immediately follow the label,
+        # so even shallow-context fallbacks (label + 1 feature) capture class structure.
         self._cond_pred = _make_predictor(k, self.learning_rate, self.cred_max, self.lambda_power)
-        self._cond_order = self._orders[0]   # single MI-ascending order for conditional
+        self._cond_order = list(reversed(self._orders[0]))  # MI-descending for conditional
 
         for _ in range(self.n_epochs):
             pairs = list(zip(rows, labels))
