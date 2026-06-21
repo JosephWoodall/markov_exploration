@@ -49,7 +49,11 @@ _TARGET_NS = '__target__'
 # Shared internals
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _make_predictor(k: int, lr: float, cred_max: float, lp: float) -> UniversalPredictor:
+def _make_predictor(
+    k: int, lr: float, cred_max: float, lp: float,
+    use_similarity_fallback: bool = False,
+    use_positional_weights: bool = False,
+) -> UniversalPredictor:
     return UniversalPredictor(
         k, None,
         learning_rate=lr,
@@ -59,6 +63,8 @@ def _make_predictor(k: int, lr: float, cred_max: float, lp: float) -> UniversalP
         cred_max=cred_max,
         lambda_power=lp,
         cont_count_min_vocab=4,
+        use_similarity_fallback=use_similarity_fallback,
+        use_positional_weights=use_positional_weights,
     )
 
 

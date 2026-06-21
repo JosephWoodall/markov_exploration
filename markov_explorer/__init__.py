@@ -23,6 +23,12 @@ from .tabular    import TabularPredictor, TabularRegressor
 from .timeseries import MultivariateTSPredictor, TimeSeriesClassifier, AnomalyDetector
 from .generative import SequenceGenerator, TabularGenerator, TimeSeriesGenerator
 
+# Generative services fixes
+from .long_term_store   import LongTermStore
+from .dual_predictor    import DualPredictor
+from .online_tokenizer  import OnlineTokenizer
+from .node_compressor   import NodeCompressor
+
 __version__ = "0.1.0"
 
 __all__ = [
@@ -43,4 +49,9 @@ __all__ = [
     "SequenceGenerator",
     "TabularGenerator",
     "TimeSeriesGenerator",
+    # Generative services fixes
+    "LongTermStore",
+    "DualPredictor",
+    "OnlineTokenizer",
+    "NodeCompressor",
 ]

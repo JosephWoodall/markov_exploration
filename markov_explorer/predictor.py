@@ -51,13 +51,14 @@ _CRED_MAX = 8.0
 
 class _TrieNode:
     """One node in the credibility-weighted context tree."""
-    __slots__ = ['children', 'succ_cred', 'node_cred', 'n_obs']
+    __slots__ = ['children', 'succ_cred', 'node_cred', 'n_obs', 'last_step']
 
     def __init__(self):
         self.children:  dict = {}     # symbol → _TrieNode
         self.succ_cred: dict = {}     # symbol → float  (credibility weight)
         self.node_cred: float = 1.0   # reliability of this context as a predictor
         self.n_obs:     int   = 0     # times this context was seen
+        self.last_step: int   = 0     # last global step this node was updated
 
 
 class UniversalPredictor:
@@ -75,6 +76,10 @@ class UniversalPredictor:
         binary_correction_scale: float | None = None,
         cred_max: float = 8.0,
         lambda_power: float = 1.0,
+        use_similarity_fallback: bool = False,
+        similarity_max_candidates: int = 8,
+        use_positional_weights: bool = False,
+        compressor: Any = None,
         **kwargs,   # absorb legacy args (coupling_lr, feedback_strength, etc.)
     ):
         self.k              = context_length   # also exposed as max_k property
@@ -95,6 +100,21 @@ class UniversalPredictor:
         # influence even at high credibility, acting as implicit depth regularization.
         self._lambda_power  = lambda_power
         self._surface_sim   = similarity_fn         # kept for API compat with forest
+
+        # Problem 2: Similarity fallback — when exact context match fails,
+        # find trie nodes sharing tokens with the current context.
+        self._use_sim_fallback = use_similarity_fallback
+        self._sim_max_cand     = similarity_max_candidates
+
+        # Problem 9: Positional weights — track which context positions
+        # historically contribute most to correct predictions.
+        self._use_pos_weights = use_positional_weights
+        self._pos_correct: list[float] = [0.0] * context_length
+        self._pos_total:   list[float] = [0.0] * context_length
+
+        # Problem 6: Node compressor — optional two-tier memory management.
+        self._compressor = compressor
+        self._global_step: int = 0
 
         self._root:  _TrieNode      = _TrieNode()
         self.history: list[Any]     = []
@@ -165,6 +185,7 @@ class UniversalPredictor:
 
     def feedback(self, actual: Any) -> None:
         self._vocab.add(actual)
+        self._global_step += 1
         n_hist    = len(self.history)
         abstained = self._last_abstained
         correct   = (not abstained) and (self._last_prediction == actual)
@@ -188,6 +209,7 @@ class UniversalPredictor:
             if node is None:
                 continue
             node.n_obs += 1
+            node.last_step = self._global_step
             if actual not in node.succ_cred:
                 node.succ_cred[actual] = 1.0
 
@@ -197,6 +219,19 @@ class UniversalPredictor:
                 self._update_node_correct(node, actual)
             else:
                 self._update_node_wrong(node, self._last_prediction, actual)
+
+            # Problem 9: update positional weight tracking
+            if self._use_pos_weights and d <= self.k:
+                idx = d - 1  # depth 1 → index 0
+                if idx < len(self._pos_total):
+                    self._pos_total[idx] += 1.0
+                    if correct:
+                        self._pos_correct[idx] += 1.0
+
+        # Problem 6: periodic compression pass
+        if (self._compressor is not None
+                and self._global_step % 500 == 0):
+            self._compressor.compress_pass(self._root, self._cred_max_base)
 
     def _distribution(self) -> dict:
         """Return last predictive distribution (for log-loss evaluation)."""
@@ -254,14 +289,33 @@ class UniversalPredictor:
     def _get_active_nodes(self) -> list[tuple[_TrieNode, int]]:
         """
         Return [(node, depth)] for matching context depths min_k..k.
-        O(k²) total — effectively O(1) for small k.
+        Includes similarity fallback when exact match fails (Problem 2).
         """
         result = []
         max_d  = min(self.k, len(self.history))
         for d in range(self.min_k, max_d + 1):
-            node = self._walk(tuple(self.history[-d:]))
+            ctx  = tuple(self.history[-d:])
+            node = self._walk(ctx)
             if node is not None and node.succ_cred:
                 result.append((node, d))
+            elif self._use_sim_fallback and d >= 2:
+                # Problem 2: similarity fallback — find nodes sharing tokens
+                sim_nodes = self._similarity_fallback(ctx, d)
+                result.extend(sim_nodes)
+            # Problem 6: check compressed nodes
+            if node is None and self._compressor is not None:
+                comp = self._compressor.get_compressed(ctx)
+                if comp is not None:
+                    # Create a lightweight proxy node from the compressed distribution
+                    proxy = _TrieNode()
+                    proxy.node_cred = comp.node_cred
+                    proxy.n_obs = comp.n_obs
+                    total = sum(comp.distribution.values()) or 1.0
+                    proxy.succ_cred = {
+                        k: v / total * comp.node_cred
+                        for k, v in comp.distribution.items()
+                    }
+                    result.append((proxy, d))
         return result
 
     def _walk(self, ctx: tuple) -> _TrieNode | None:
@@ -284,6 +338,7 @@ class UniversalPredictor:
         """
         CTW-style credibility-weighted blend, shallow to deep.
         Uses KT prior (alpha = 0.5/|V|) at each node for smoothing.
+        Incorporates positional weights when enabled (Problem 9).
         """
         if not self._vocab:
             return {}
@@ -309,6 +364,11 @@ class UniversalPredictor:
                 for s in self._vocab
             }
 
+        # Compute positional weight multipliers (Problem 9)
+        pos_multiplier = None
+        if self._use_pos_weights:
+            pos_multiplier = self._positional_multipliers()
+
         by_depth = {d: n for n, d in active}
         for d in range(1, self.k + 1):
             if d not in by_depth:
@@ -320,6 +380,9 @@ class UniversalPredictor:
                 for s in self._vocab
             }
             lam     = self._blend_lambda(node.node_cred)
+            # Problem 9: scale lambda by positional weight
+            if pos_multiplier is not None and d - 1 < len(pos_multiplier):
+                lam = min(1.0, lam * pos_multiplier[d - 1])
             blended = {s: lam * local[s] + (1 - lam) * blended[s]
                        for s in self._vocab}
 
@@ -327,6 +390,103 @@ class UniversalPredictor:
         if total < 1e-12:
             return {s: 1.0 / V for s in self._vocab}
         return {s: v / total for s, v in blended.items()}
+
+    # ── Problem 2: similarity fallback ─────────────────────────────────────────
+
+    def _similarity_fallback(
+        self, ctx: tuple, depth: int,
+    ) -> list[tuple[_TrieNode, int]]:
+        """
+        When exact context match fails at depth d, find trie nodes sharing
+        tokens with the current context and blend their distributions
+        weighted by token-overlap (Jaccard).
+        """
+        candidates = []
+        ctx_set = set(ctx)
+
+        # Try progressively shorter prefixes to find a branch point
+        for trim in range(1, len(ctx)):
+            prefix = ctx[trim:]
+            branch = self._walk(prefix)
+            if branch is None or not branch.children:
+                continue
+            # Enumerate children of this branch
+            for sym, child in branch.children.items():
+                if not child.succ_cred:
+                    continue
+                # Build the full context this child represents
+                child_ctx_set = set(prefix) | {sym}
+                # Jaccard overlap
+                union = len(ctx_set | child_ctx_set)
+                overlap = len(ctx_set & child_ctx_set) / union if union > 0 else 0.0
+                if overlap > 0.0:
+                    candidates.append((child, depth, overlap))
+            if candidates:
+                break  # found matches at this trim level
+
+        if not candidates:
+            return []
+
+        # Keep top candidates by overlap score
+        candidates.sort(key=lambda x: x[2], reverse=True)
+        top = candidates[:self._sim_max_cand]
+
+        # Create a blended proxy node from the top candidates
+        if len(top) == 1:
+            return [(top[0][0], top[0][1])]
+
+        # Blend multiple candidates into a single proxy
+        proxy = _TrieNode()
+        total_weight = sum(c[2] for c in top)
+        for node, d, w in top:
+            weight = w / total_weight
+            for sym, cred in node.succ_cred.items():
+                proxy.succ_cred[sym] = proxy.succ_cred.get(sym, 0.0) + cred * weight
+            proxy.node_cred += node.node_cred * weight
+            proxy.n_obs += int(node.n_obs * weight)
+
+        return [(proxy, depth)]
+
+    # ── Problem 9: positional weight helpers ──────────────────────────────────
+
+    def _positional_multipliers(self) -> list[float]:
+        """
+        Return per-depth multipliers based on historical accuracy contribution.
+        Positions that historically helped more get multiplier > 1.0.
+        """
+        weights = []
+        for i in range(self.k):
+            if self._pos_total[i] > 0:
+                acc = self._pos_correct[i] / self._pos_total[i]
+            else:
+                acc = 0.5  # neutral prior
+            weights.append(acc)
+
+        mean_w = sum(weights) / len(weights) if weights else 1.0
+        if mean_w < 1e-12:
+            return [1.0] * self.k
+        return [w / mean_w for w in weights]
+
+    # ── Problem 6: compression helpers ────────────────────────────────────────
+
+    def compress_pass(self) -> dict:
+        """Run a compression pass on the trie. Returns stats dict."""
+        if self._compressor is None:
+            return {'compressed': 0, 'skipped': 0, 'active': 0}
+        return self._compressor.compress_pass(self._root, self._cred_max_base)
+
+    def memory_stats(self) -> dict:
+        """Return memory usage stats including compressed nodes."""
+        active = len(self._nodes)
+        compressed = 0
+        if self._compressor is not None:
+            compressed = self._compressor.stats().get('n_compressed', 0)
+        return {
+            'active_nodes': active,
+            'compressed_nodes': compressed,
+            'total_nodes': active + compressed,
+            'global_step': self._global_step,
+        }
 
     # ── backward-compat API (used by forest.py and diagnostics) ──────────────
 

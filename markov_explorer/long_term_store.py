@@ -249,6 +249,55 @@ class LongTermStore:
             'consequence_contexts': len(self._conseq),
         }
 
+    def learning_curve(self) -> list[float]:
+        """Per-run replay accuracy as a plottable list. Watch it climb."""
+        return [r['replay_accuracy'] for r in self._run_history]
+
+    def top_consequences(self, context: tuple, offset: int = 2, n: int = 5) -> list[tuple]:
+        """
+        Most likely downstream outcomes `offset` steps after context.
+
+        Returns list of (token, probability) sorted by probability descending.
+        Useful for planning and lookahead: "what tends to happen 2 steps
+        after seeing this context?"
+        """
+        dist = self.predict_consequence(context, offset)
+        if not dist:
+            return []
+        items = sorted(dist.items(), key=lambda x: x[1], reverse=True)
+        return items[:n]
+
+    def coverage_report(self, sequence: list, k: int) -> dict:
+        """
+        Detailed breakdown of which contexts in sequence the store has seen.
+
+        Returns
+        -------
+        dict with keys:
+          coverage : float (fraction of k-grams matched)
+          matched  : int   (number of k-grams with store data)
+          total    : int   (total k-grams in sequence)
+          novel    : list[tuple]  (first 10 unmatched contexts)
+        """
+        if len(sequence) < k + 1:
+            return {'coverage': 0.0, 'matched': 0, 'total': 0, 'novel': []}
+        matched = 0
+        total_kgrams = 0
+        novel = []
+        for i in range(k, len(sequence)):
+            ctx = tuple(sequence[i - k:i])
+            total_kgrams += 1
+            if ctx in self._dist:
+                matched += 1
+            elif len(novel) < 10:
+                novel.append(ctx)
+        return {
+            'coverage': matched / total_kgrams if total_kgrams > 0 else 0.0,
+            'matched': matched,
+            'total': total_kgrams,
+            'novel': novel,
+        }
+
     def context_coverage(self, sequence: list, k: int) -> float:
         """Fraction of k-grams in sequence that the store has seen."""
         if len(sequence) < k + 1:

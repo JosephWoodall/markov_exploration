@@ -45,6 +45,19 @@ except ImportError:
     BaseEstimator = object
     _SKLEARN = False
 
+# Lazy imports for optional components
+def _get_online_tokenizer():
+    from .online_tokenizer import OnlineTokenizer
+    return OnlineTokenizer
+
+def _get_dual_predictor():
+    from .dual_predictor import DualPredictor
+    return DualPredictor
+
+def _get_long_term_store():
+    from .long_term_store import LongTermStore
+    return LongTermStore
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Shared sampling primitive
@@ -115,21 +128,33 @@ def _generate_from_predictor(
     top_p:       float | None,
     rng:         random.Random,
     stop_tokens: set | None = None,
+    tokenizer=None,
+    long_term_store=None,
 ) -> list:
     """
     Auto-regressively sample n_tokens from predictor p.
     History is temporarily extended then restored.
+
+    Optional: tokenizer applies merge rules to seed tokens.
+    Optional: long_term_store provides three-layer fallback blending.
     """
     saved = p.history[:]
 
     if seed:
-        for tok in seed:
+        seed_tokens = tokenizer.tokenize(seed) if tokenizer else seed
+        for tok in seed_tokens:
             p.observe(tok)
 
     generated = []
     for _ in range(n_tokens):
         p.predict()
-        dist  = dict(p._last_distribution)
+        dist = dict(p._last_distribution)
+
+        # Three-layer fallback (Problem 8): blend with long-term store
+        if long_term_store is not None and hasattr(p, 'history') and p.history:
+            ctx = tuple(p.history[-p.k:]) if len(p.history) >= p.k else tuple(p.history)
+            dist = long_term_store.blend(dist, ctx, p._vocab)
+
         token = _sample_dist(dist, temperature, top_k, top_p, rng)
         if token is None:
             break
@@ -139,20 +164,51 @@ def _generate_from_predictor(
         p.observe(token)
 
     p.history = saved
+
+    # Detokenize if we used a tokenizer
+    if tokenizer is not None:
+        generated = tokenizer.detokenize(generated)
+
     return generated
 
 
-def _train_autoregressive(p: UniversalPredictor, tokens: list) -> None:
+def _train_autoregressive(
+    p: UniversalPredictor,
+    tokens: list,
+    tokenizer=None,
+    long_term_store=None,
+) -> None:
     """
     Train p on every consecutive token pair within a single sequence.
     Each token is predicted from all preceding tokens in that sequence.
     This learns the joint distribution P(t_0) P(t_1|t_0) … P(t_n|t_0..t_{n-1}).
+
+    Optional: tokenizer applies online merge rules before training.
+    Optional: long_term_store receives replay after training completes.
     """
+    if tokenizer is not None:
+        tokens = tokenizer.tokenize(tokens)
+
     p.history.clear()
+    correct = 0
+    total = 0
     for token in tokens:
         p.predict()
+        pred = p._last_prediction
         p.observe(token)
         p.feedback(token)
+        total += 1
+        if pred == token:
+            correct += 1
+
+    # Update tokenizer merge scores with running accuracy
+    if tokenizer is not None and total > 0:
+        tokenizer.update(tokens, correct / total)
+
+    # Replay high-confidence patterns into long-term store
+    if long_term_store is not None and total > 0:
+        long_term_store.replay(p, tokens)
+
     p.history.clear()
 
 
@@ -200,6 +256,12 @@ class SequenceGenerator(BaseEstimator):
         cred_max:       float = 6.05,
         lambda_power:   float = 0.65,
         random_seed:    int   = 42,
+        use_online_tokenizer: bool = False,
+        tokenizer_max_merges: int  = 64,
+        use_dual_predictor: bool = False,
+        long_term_store: Any  = None,
+        use_similarity_fallback: bool = False,
+        use_positional_weights: bool = False,
     ):
         self.context_length = context_length
         self.temperature    = temperature
@@ -209,6 +271,17 @@ class SequenceGenerator(BaseEstimator):
         self.cred_max       = cred_max
         self.lambda_power   = lambda_power
         self.random_seed    = random_seed
+        # Problem 1/10: OnlineTokenizer
+        self.use_online_tokenizer = use_online_tokenizer
+        self.tokenizer_max_merges = tokenizer_max_merges
+        # Problem 7: DualPredictor
+        self.use_dual_predictor = use_dual_predictor
+        # Problem 3/5/8: LongTermStore
+        self.long_term_store = long_term_store
+        # Problem 2: Similarity fallback
+        self.use_similarity_fallback = use_similarity_fallback
+        # Problem 9: Positional weights
+        self.use_positional_weights = use_positional_weights
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -218,10 +291,23 @@ class SequenceGenerator(BaseEstimator):
         sequences: str | list | list-of-lists
             A single string is treated as a character sequence.
         """
-        self._pred = _make_predictor(
-            self.context_length, self.learning_rate, self.cred_max, self.lambda_power,
-        )
+        if self.use_dual_predictor:
+            DualPredictor = _get_dual_predictor()
+            self._pred = DualPredictor(
+                self.context_length,
+                learning_rate=self.learning_rate,
+            )
+        else:
+            self._pred = _make_predictor(
+                self.context_length, self.learning_rate, self.cred_max, self.lambda_power,
+                use_similarity_fallback=self.use_similarity_fallback,
+                use_positional_weights=self.use_positional_weights,
+            )
         self._rng = random.Random(self.random_seed)
+        self._tokenizer = None
+        if self.use_online_tokenizer:
+            OT = _get_online_tokenizer()
+            self._tokenizer = OT(max_merges=self.tokenizer_max_merges)
         self.is_fitted_ = True
         self._train_sequences(sequences)
         return self
@@ -263,6 +349,8 @@ class SequenceGenerator(BaseEstimator):
             top_p       if top_p       is not None else self.top_p,
             self._rng,
             set(stop_tokens) if stop_tokens else None,
+            tokenizer=getattr(self, '_tokenizer', None),
+            long_term_store=self.long_term_store,
         )
 
     def generate_text(
@@ -318,14 +406,16 @@ class SequenceGenerator(BaseEstimator):
     # ── internal ──────────────────────────────────────────────────────────────
 
     def _train_sequences(self, sequences) -> None:
+        tok = getattr(self, '_tokenizer', None)
+        lts = self.long_term_store
         if isinstance(sequences, str):
-            _train_autoregressive(self._pred, list(sequences))
+            _train_autoregressive(self._pred, list(sequences), tokenizer=tok, long_term_store=lts)
         elif sequences and not isinstance(sequences[0], (list, tuple)):
             # Flat list — treat as one sequence
-            _train_autoregressive(self._pred, list(sequences))
+            _train_autoregressive(self._pred, list(sequences), tokenizer=tok, long_term_store=lts)
         else:
             for seq in sequences:
-                _train_autoregressive(self._pred, list(seq))
+                _train_autoregressive(self._pred, list(seq), tokenizer=tok, long_term_store=lts)
 
     def _check_fitted(self):
         if not hasattr(self, '_pred'):
@@ -380,6 +470,9 @@ class TabularGenerator(BaseEstimator):
         cred_max:       float      = 6.05,
         lambda_power:   float      = 0.65,
         random_seed:    int        = 42,
+        long_term_store: Any       = None,
+        use_similarity_fallback: bool = False,
+        use_positional_weights: bool = False,
     ):
         self.n_bins         = n_bins
         self.context_length = context_length
@@ -392,6 +485,9 @@ class TabularGenerator(BaseEstimator):
         self.cred_max       = cred_max
         self.lambda_power   = lambda_power
         self.random_seed    = random_seed
+        self.long_term_store = long_term_store
+        self.use_similarity_fallback = use_similarity_fallback
+        self.use_positional_weights = use_positional_weights
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -642,6 +738,10 @@ class TimeSeriesGenerator(BaseEstimator):
         cred_max:       float = 6.05,
         lambda_power:   float = 0.65,
         random_seed:    int   = 42,
+        use_dual_predictor: bool = False,
+        long_term_store: Any  = None,
+        use_similarity_fallback: bool = False,
+        use_positional_weights: bool = False,
     ):
         self.n_bins         = n_bins
         self.context_length = context_length
@@ -652,6 +752,10 @@ class TimeSeriesGenerator(BaseEstimator):
         self.cred_max       = cred_max
         self.lambda_power   = lambda_power
         self.random_seed    = random_seed
+        self.use_dual_predictor = use_dual_predictor
+        self.long_term_store = long_term_store
+        self.use_similarity_fallback = use_similarity_fallback
+        self.use_positional_weights = use_positional_weights
 
     # ── public API ────────────────────────────────────────────────────────────
 

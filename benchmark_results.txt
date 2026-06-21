@@ -1,0 +1,30 @@
+
+======================================================================
+  TABULAR CLASSIFICATION: markov vs RandomForest
+======================================================================
+  RandomForest Acc : 0.935  (Time: 0.078s)
+  Markov Tabular   : 0.595  (Time: 0.136s)
+  ✗ Baseline performed better.
+
+======================================================================
+  TIME SERIES FORECASTING: markov vs Autoregressive RF
+======================================================================
+  AR-RandomForest MSE: 0.0249  (Time: 0.736s)
+  Markov TS Predictor: 0.1600  (Time: 0.041s)
+  ✗ Baseline performed better.
+
+======================================================================
+  GENERATIVE SEQUENCE: markov vs N-gram MLE
+======================================================================
+
+  Dataset: Alice in Wonderland
+    N-gram (3-gram) bits/token: 2.940  (Time: 0.001s)
+    Markov Generator bits/token : 3.425  (Time: 0.046s)
+    ✗ Baseline performed better.
+
+  Dataset: Bacteriophage Lambda DNA
+    N-gram (4-gram) bits/token: 2.016  (Time: 0.001s)
+    Markov Generator bits/token : 1.978  (Time: 0.026s)
+    ✓ Markov Explorer outperformed Baseline!
+
+  Benchmarking Complete!
