@@ -1,6 +1,167 @@
 # Universal Sequence Predictor
 
-Online, instance-based sequence prediction. Given any stream of discrete observations, it learns to predict what comes next — for any symbol type, in any domain — without assuming a fixed distribution, a known alphabet, or a stationary process.
+Online, instance-based sequence predictor. Given any stream of discrete observations, it learns to predict what comes next — for any symbol type, in any domain — without assuming a fixed distribution, a known alphabet, or a stationary process.
+
+The `markov_explorer` package extends this core engine to tabular classification, regression, multivariate time series forecasting, anomaly detection, and generative modeling. All classes are sklearn-compatible.
+
+---
+
+## Installation
+
+```bash
+pip install -e .                  # editable install (no required deps)
+pip install -e ".[all]"           # with scikit-learn, numpy, pandas
+```
+
+```python
+from markov_explorer import (
+    UniversalPredictor, PredictorForest,           # core engine
+    TabularPredictor, TabularRegressor,             # tabular ML
+    MultivariateTSPredictor, TimeSeriesClassifier,  # time series
+    AnomalyDetector,
+    SequenceGenerator, TabularGenerator,            # generative
+    TimeSeriesGenerator,
+)
+```
+
+---
+
+## Components
+
+### Core Engine
+
+**`UniversalPredictor`**
+
+The base algorithm. Maintains a prefix trie of observed contexts. Each node stores a credibility score that rises on correct predictions and falls — faster when the node was highly confident — on wrong ones. At prediction time it blends distributions from shallow (general) to deep (specific) contexts using CTW-style recursive mixing, where each depth's influence is proportional to its credibility track record. No forgetting parameter, no drift detector: concept drift is handled automatically because stale nodes lose credibility and the blend shifts back to shallower, more stable contexts.
+
+API: `observe(x)` → `predict()` → `feedback(x)`. Set `min_confidence` to abstain rather than guess below a threshold.
+
+**`PredictorForest`**
+
+Ensemble of `UniversalPredictor` instances with four diversity mechanisms: heterogeneous context lengths (k, k+1, k+2, …), feedback dropout (each tree independently skips learning steps), staggered training offsets, and per-tree credibility weights. Adaptive voting: when trees agree confidently it uses a product (decisive), when uncertain it uses a mixture (calibrated).
+
+---
+
+### Preprocessing
+
+**`FeatureDiscretizer`**
+
+Converts any feature matrix to token sequences. Continuous features → equal-frequency quantile bins (tokens are bin indices). Categorical features → ordinal integers. Missing values and `NaN` → a special `__MISSING__` token. The result is a list of `(feature_index, bin)` tuples per row, which the trie can match exactly.
+
+**`LabelEncoder`**
+
+Bidirectional label ↔ integer mapping with `partial_fit` for new classes arriving at runtime. Used internally by all supervised classes.
+
+---
+
+### Tabular ML
+
+**`TabularPredictor`** — classification
+
+Encodes each row as a sequence of feature tokens, with the class label as the final token. The trie learns `P(label | feature_sequence)`. Three feature orderings are ensembled (MI-ascending, MI-descending, natural) to reduce ordering sensitivity. Prediction averages label distributions across all orderings.
+
+sklearn-compatible: works in `Pipeline`, `GridSearchCV`, `cross_val_score`. Supports `partial_fit` for streaming or incremental learning.
+
+```python
+clf = TabularPredictor(n_bins=10, n_orderings=3)
+clf.fit(X_train, y_train)
+clf.predict(X_test)            # class labels
+clf.predict_proba(X_test)      # list of {label: prob} dicts
+clf.partial_fit(X_new, y_new)  # online update
+```
+
+**`TabularRegressor`** — regression
+
+Same architecture as `TabularPredictor` but the continuous target is discretized into quantile bins. Prediction returns the credibility-weighted mean of bin centers. `predict_interval()` also returns the standard deviation of the bin distribution as a calibrated uncertainty estimate.
+
+```python
+reg = TabularRegressor(n_bins=10, n_target_bins=20)
+reg.fit(X_train, y_train)
+reg.predict(X_test)            # float means
+reg.predict_interval(X_test)   # list of (mean, std) tuples
+reg.score(X_test, y_test)      # R²
+```
+
+---
+
+### Time Series
+
+**`MultivariateTSPredictor`**
+
+Online step-ahead predictor for multivariate (or univariate) time series. Each timestep is encoded as a compound token `(bin_0, bin_1, ..., bin_{M-1})` — a hashable tuple the trie matches exactly. Context is the last k compound tokens. Adapts immediately to distribution shift without retraining.
+
+```python
+pred = MultivariateTSPredictor(n_bins=8, context_length=5)
+pred.fit(X_train)              # warm up trie on historical data
+pred.predict()                 # float vector (per-dimension means)
+pred.observe(x_new)            # advance internal state
+pred.feedback(x_new)           # update trie with true value
+pred.forecast(n_steps=10)      # autoregressive multi-step forecast
+pred.score(X_test)             # bits/step (lower = better fit)
+```
+
+**`TimeSeriesClassifier`**
+
+Classifies fixed-length time series windows. Each window of T steps becomes T compound tokens; the class label is predicted as the next token after the full window. Supports `partial_fit` for streaming classification. Works in sklearn Pipeline.
+
+```python
+clf = TimeSeriesClassifier(n_bins=8, window_size=50)
+clf.fit(X_windows, y_labels)
+clf.predict(X_test)            # class labels
+clf.predict_proba(X_test)      # list of {label: prob} dicts
+```
+
+**`AnomalyDetector`**
+
+Trains a `MultivariateTSPredictor` on normal data. At inference, each timestep receives anomaly score = `-log2 P(actual | context)`. High score = low predictability = anomalous. The trie is not updated during scoring, so anomalous patterns do not contaminate the model of normal behavior.
+
+sklearn `OutlierMixin` compliant: `predict()` returns 1 (anomaly) / -1 (normal); `decision_function()` returns negative anomaly scores for threshold-based pipelines.
+
+```python
+det = AnomalyDetector(n_bins=8, context_length=5)
+det.fit(X_normal)
+det.score_samples(X_test)      # float scores (higher = more anomalous)
+det.predict(X_test)            # 1 or -1 per timestep
+```
+
+---
+
+### Generative
+
+**`SequenceGenerator`**
+
+Learns a distribution over sequences and samples from it. Supports temperature scaling (`p_i ← p_i^(1/T)`), top-k filtering, and nucleus (top-p) sampling. `generate_text()` joins tokens with a separator for character- or word-level text generation.
+
+```python
+gen = SequenceGenerator(context_length=6, temperature=0.9)
+gen.fit(list_of_sequences)
+gen.generate(50, seed=['the '], stop_tokens=['.'])  # list of tokens
+gen.generate_text(100, sep='')                       # joined string
+gen.score(sequence)                                  # bits/token
+```
+
+**`TabularGenerator`**
+
+Learns the joint distribution `P(f0, f1, ..., fn, label)` and samples synthetic rows. Trains two predictors internally: one with label last (unconditional generation, `P(label | features)`) and one with label first (class-conditional generation, `P(features | label)`). This separation is necessary — a label-last model given a leading label token is out-of-distribution.
+
+```python
+gen = TabularGenerator(n_bins=10, temperature=1.0)
+gen.fit(X, y)
+gen.sample(n_rows=100)                       # list of dicts
+gen.sample(n_rows=50, given_label='cat')     # class-conditional
+gen.sample_dataframe(n_rows=100)             # pandas DataFrame
+```
+
+**`TimeSeriesGenerator`**
+
+Learns a distribution over multivariate time series and samples from it. Unlike `MultivariateTSPredictor.forecast()` (argmax, deterministic), generation here samples from the distribution — producing diverse trajectories. `augment()` wraps generation for data augmentation.
+
+```python
+gen = TimeSeriesGenerator(n_bins=8, temperature=1.1)
+gen.fit(X_series)
+gen.generate(n_steps=100, seed=X_seed)       # list of float vectors
+gen.augment(X, n_copies=5, temperature=1.1)  # augmented dataset
+```
 
 ---
 
@@ -21,10 +182,10 @@ If you have a stream of categorical states and need to predict the next one — 
 
 **Where it is not competitive:**
 
-- **Tabular classification with independent rows** — if your data is feature vectors with no meaningful temporal order, use gradient boosting. (A tabular extension via feature-as-sequence encoding is planned; see Roadmap.)
+- **Tabular classification where the data is large and stationary** — on tabular datasets >10K rows without concept drift, gradient boosting will typically win by 5–10pp. The trie shines when data is small, streaming, or drifting.
 - **Long-range sequence dependencies** — the context window is fixed at k. Anything requiring memory beyond the last k observations needs a transformer or RNN.
 - **Large stationary corpora** — on 50K tokens of text or DNA, count-based methods (CTW, KN) hold a 1–2pp accuracy advantage because their unbounded counts eventually outcompete the credibility cap. The gap closes on noisy or drifting data.
-- **Continuous regression targets without discretization** — native support requires binning the output. (Regression mode exists; see below.)
+- **Continuous regression targets** — the regressor bins the output; precision is bounded by `n_target_bins`. Point-prediction accuracy on smooth regression tasks is below random forests.
 
 ---
 
@@ -221,42 +382,31 @@ Expanding from small samples to full datasets exposed a fundamental architectura
 
 ---
 
-## Roadmap
-
-The current architecture handles discrete sequence prediction. The planned extensions, in order:
-
-**1. Tabular classification (next)**
-
-Convert tabular rows to sequences via feature-as-sequence encoding: each feature value becomes a token, the label is the last token. A discretization layer handles continuous inputs. Feature ordering by mutual information with the label recovers decision-tree-quality accuracy on structured data while inheriting online updating and drift robustness.
-
-**2. Continuous multivariate time series**
-
-Replace exact trie lookup with approximate nearest-neighbor matching using the existing similarity function infrastructure. Allows continuous-valued observations without discretization. Compound tuple tokens (one per time step, all features together) are already supported for discrete multivariate inputs.
-
-**3. Regression**
-
-Regression mode already exists in `PredictorForest` (`task='regression'`). The extension is output discretization: bin the continuous target at training time, output credibility-weighted mean of bin centers at inference time. The predictive distribution over bins provides calibrated uncertainty estimates.
-
----
-
 ## Files
+
+**Package (`markov_explorer/`):**
 
 | File | Purpose |
 |---|---|
-| `predictor.py` | `UniversalPredictor` — Module 1 core |
-| `forest.py` | `PredictorForest` — Module 1 ensemble |
-| `module2.py` | `GoalDirectedGenerator` — Module 2 (autoregressive, beam search, retrieval) |
+| `predictor.py` | `UniversalPredictor` — core trie engine |
+| `forest.py` | `PredictorForest` — ensemble with heterogeneous k and feedback dropout |
+| `discretize.py` | `FeatureDiscretizer`, `LabelEncoder` — preprocessing |
+| `tabular.py` | `TabularPredictor`, `TabularRegressor` — tabular ML |
+| `timeseries.py` | `MultivariateTSPredictor`, `TimeSeriesClassifier`, `AnomalyDetector` |
+| `generative.py` | `SequenceGenerator`, `TabularGenerator`, `TimeSeriesGenerator` |
+
+**Root (benchmark scripts and shims):**
+
+| File | Purpose |
+|---|---|
 | `baselines.py` | Standard baselines: Persistence, Majority, N-gram, PPM-D |
 | `baselines_extended.py` | Extended baselines: KN, PPM\*, Online LSTM |
 | `datasets.py` | Dataset loaders (airline, text, DNA, weather, PRNG, electricity) |
-| `similarity.py` | Surface similarity functions (hamming, gaussian, jaccard) |
 | `ieee_benchmark.py` | Full benchmark suite generating LaTeX tables |
-| `ieee_tables/` | Generated LaTeX tables and figures |
 | `run_experiments.py` | Quick single-predictor experiment runner |
 | `run_forest.py` | Quick forest experiment runner |
-| `tests.py` | Unit tests |
-| `test_forest.py` | Forest-specific tests |
-| `tasks/` | Paper roadmap and core-principle manifesto |
+| `module2.py` | `GoalDirectedGenerator` — autoregressive, beam search, retrieval |
+| `tasks/` | Core-principle manifesto and todo |
 
 ---
 
