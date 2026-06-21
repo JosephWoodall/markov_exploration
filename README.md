@@ -172,36 +172,34 @@ The three generators (`SequenceGenerator`, `TabularGenerator`, `TimeSeriesGenera
 **Known limitations:**
 
 1. **Hard context ceiling.** The model conditions on exactly the last k tokens — nothing before that is visible, regardless of how well the input is tokenized. For structured sequence prediction this is usually fine; for tasks with true long-range dependencies it is an architectural wall.
+   *Fix:* `OnlineTokenizer` — merges frequent token pairs into single tokens while the stream runs, no offline training required. Each of the k slots then covers more of the original sequence. Merge decisions are scored by whether they improve or hurt prediction accuracy and adjusted accordingly.
 
 2. **No cross-context generalization.** `"the cat sat"` and `"a cat sat"` are unrelated nodes in the trie. Evidence never transfers between structurally similar but lexically different contexts. Count-based methods (CTW, KN) share statistical strength through smoothing; the trie does not.
+   *Fix:* Similarity fallback — when exact context match fails at depth d, find trie nodes that share the most tokens with the current context and blend their distributions by token-overlap weight. Enabled via `use_similarity_fallback=True`.
 
 3. **Cold start.** The first ~800 tokens of any sequence are sparse. Predictions fall back to the KT/KN prior, which is weak. This is the dominant failure mode for short generation tasks.
+   *Fix:* `LongTermStore` — a persistent trie that never resets between runs. Before a new sequence begins it provides a warm prior. As the sequence-specific trie builds confidence it gradually takes over. Observable via `run_history()`.
 
 4. **Credibility cap stalls at scale.** `cred_max` freezes the blend weight λ before it reaches 1.0. On long stationary corpora, count-based methods keep sharpening indefinitely while the predictor plateaus. This is the source of the 1–2pp deficit against CTW on Alice and Moby Dick.
+   *Fix:* Adaptive cap — the ceiling rises slowly as a node accumulates observations, so well-evidenced nodes keep sharpening. Active (uncompressed) nodes have no hard cap; the cap only applies to archived compressed nodes. Enabled via `adaptive_cap=True`.
 
 5. **No cross-sequence memory.** Every `fit()` call starts from scratch. Patterns learned on one corpus leave no trace for the next. The model cannot accumulate prior knowledge across sessions.
+   *Fix:* `LongTermStore` replay — at the end of each sequence, high-confidence patterns from the short-term trie are written into the long-term store at a slow learning rate. Patterns that appear consistently across many sequences accumulate and strengthen. The store persists to disk as a gzip-compressed file.
 
 6. **Memory grows unbounded.** The trie stores every observed n-gram and never compresses converged nodes. Long training sequences produce large tries with no automatic pruning.
+   *Fix:* `NodeCompressor` — when a node has hit its credibility ceiling and its distribution has been stable, it is gzip-compressed and freed from active memory. Active learning nodes stay in full resolution. Compression decisions are scored over time: if a compressed node's accuracy degrades it is decompressed and allowed to keep learning.
 
 7. **Stationary/drift tradeoff.** Any parameter that improves generation quality on stationary data (higher `cred_max`, higher `lambda_power`) hurts adaptation speed on drifting data, and vice versa. This is architectural — it cannot be tuned away.
+   *Fix:* `DualPredictor` — two predictors run in parallel, one tuned for stability, one for fast drift recovery. A rolling error-rate window routes weight between them. When error rate spikes, weight shifts toward the drift predictor; when stable and low, toward the stability predictor.
 
 8. **Zero mass on unseen k-grams.** The trie assigns no probability to any context it has never observed. Even with KT/KN smoothing, it cannot infer that two structurally similar but lexically different contexts should produce similar outputs. A neural model interpolates across weight space; the trie has a hard zero and must rely entirely on backoff to shallower depths.
+   *Fix:* Three-layer fallback — (1) short-term trie at progressively shallower depths, (2) `LongTermStore` which has seen far more contexts and will match where the short-term trie cannot, (3) running unigram floor as the final backstop. With a well-populated long-term store the floor is rarely reached.
 
 9. **No selective gating.** All k sampled past tokens are weighted by credibility equally — the model cannot decide which parts of past context are relevant to the current prediction and suppress the rest. SSM-style selective state updates approximate this; credibility is a coarser proxy that operates at the node level, not the token level.
+   *Fix:* Positional weight table — the predictor tracks for each of the k context positions how often a match at that position contributed to a correct prediction. Positions that historically helped more get more influence. Updated after every feedback step. Enabled via `use_positional_weights=True`.
 
 10. **No joint optimization of compression and prediction.** If a compression layer (BPE, VQ codebook, adaptive discretization) is added upstream to extend the effective receptive field, it is trained separately from the trie. Errors in the compression step compound into the prediction step. Neural architectures train both end-to-end via backprop, so the tokenizer learns to produce tokens that are maximally predictable, not just maximally compact. **Note:** solving limitations 1 and 8 via learned semantic compression and external memory converges on a small neural architecture from a different direction — at that point the question becomes whether to build toward that explicitly or treat the trie as a fast specialist for structured domains and delegate language tasks elsewhere.
-
-**Potential mitigation: two-timescale long storage**
-
-Problems 3, 5, and partially 4 can be addressed with a persistent background trie that accumulates evidence across sequences and sessions:
-
-- **Short-term trie** (current behavior): sequence-scoped, high learning rate, resets between runs. Handles local adaptation and drift.
-- **Long-term trie**: never resets, low learning rate, updated incrementally from completed sequences. Provides a warm prior that eliminates cold start and carries patterns across sessions.
-- **Blend**: `P_final = λ_short · P_short + λ_long · P_long`, where blend weights are credibility-gated. The long-term trie dominates at cold start; the short-term trie takes over as it accumulates evidence.
-
-The feedback mechanism: when a sequence ends, replay the short-term trie's high-confidence updates into the long-term trie at a reduced learning rate. This is the complementary learning systems pattern — fast episodic memory layered on slow semantic memory.
-
-This does not fix limitations 1, 2, or 7. The context ceiling and generalization gap require a different representation (BPE or VQ tokenization closes the gap partially by making each of the k slots carry more semantic content; it does not extend the window).
+   *Fix:* `OnlineTokenizer` merge scoring — after each merge, prediction accuracy on the immediately following tokens is measured. Merges that hurt accuracy are penalized; merges that help are reinforced. Over many sequences the tokenizer learns which compressions are genuinely useful for prediction, not just compact.
 
 ---
 
