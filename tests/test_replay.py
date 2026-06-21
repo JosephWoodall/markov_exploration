@@ -1,6 +1,6 @@
 import sys
 sys.path.insert(0, '.')
-from markov_explorer.tabular import TabularPredictor
+from uchi.tabular import TabularPredictor
 from tests._datasets import load_synthetic_tabular
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import train_test_split
@@ -15,7 +15,7 @@ mp_pure._disc = mp_pure._disc.fit(X_train.tolist()) # Initialize discretizer
 mp_pure._lenc = mp_pure._lenc.fit(y_train.tolist())
 mp_pure._rng = __import__('random').Random(42)
 mp_pure._orders = mp_pure._orders or [[i for i in range(10)] for _ in range(3)]
-mp_pure._preds = [__import__('markov_explorer.tabular', fromlist=['_make_predictor'])._make_predictor(10, 0.08, 6.05, 0.65) for _ in range(3)]
+mp_pure._preds = [__import__('uchi.tabular', fromlist=['_make_predictor'])._make_predictor(10, 0.08, 6.05, 0.65) for _ in range(3)]
 
 t0 = time.time()
 for row, label in zip(X_train.tolist(), y_train.tolist()):

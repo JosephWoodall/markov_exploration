@@ -17,11 +17,11 @@ from sklearn.metrics import accuracy_score, mean_squared_error
 
 import sys
 sys.path.insert(0, '.')
-from markov_explorer.tabular import TabularPredictor, TabularRegressor
-from markov_explorer.hoeffding import HoeffdingPredictor
-from markov_explorer.timeseries import MultivariateTSPredictor
-from markov_explorer.generative import SequenceGenerator
-from markov_explorer.distributional import DistributionalTokenizer
+from uchi.tabular import TabularPredictor, TabularRegressor
+from uchi.hoeffding import HoeffdingPredictor
+from uchi.timeseries import MultivariateTSPredictor
+from uchi.generative import SequenceGenerator
+from uchi.distributional import DistributionalTokenizer
 from tests import _datasets
 
 # ── Baselines ────────────────────────────────────────────────────────────────

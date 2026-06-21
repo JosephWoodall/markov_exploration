@@ -2,7 +2,7 @@
 
 Online, instance-based sequence predictor. Given any stream of discrete observations, it learns to predict what comes next — for any symbol type, in any domain — without assuming a fixed distribution, a known alphabet, or a stationary process.
 
-The `markov_explorer` package extends this core engine to tabular classification, regression, multivariate time series forecasting, anomaly detection, and generative modeling. All classes are sklearn-compatible.
+The `uchi` package extends this core engine to tabular classification, regression, multivariate time series forecasting, anomaly detection, and generative modeling. All classes are sklearn-compatible.
 
 ---
 
@@ -14,7 +14,7 @@ pip install -e ".[all]"           # with scikit-learn, numpy, pandas
 ```
 
 ```python
-from markov_explorer import (
+from uchi import (
     UniversalPredictor, PredictorForest,           # core engine
     TabularPredictor, TabularRegressor,             # tabular ML
     MultivariateTSPredictor, TimeSeriesClassifier,  # time series
@@ -439,7 +439,7 @@ Expanding from small samples to full datasets exposed a fundamental architectura
 
 ## Files
 
-**Package (`markov_explorer/`):**
+**Package (`uchi/`):**
 
 | File | Purpose |
 |---|---|

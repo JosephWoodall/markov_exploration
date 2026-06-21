@@ -1,15 +1,15 @@
 """
-markov_explorer
+uchi
 ===============
 Online credibility-weighted sequence predictor for tabular, time series,
 and generative machine learning tasks.
 
 Quick start
 -----------
-    from markov_explorer import TabularPredictor, TabularRegressor
-    from markov_explorer import MultivariateTSPredictor, TimeSeriesClassifier
-    from markov_explorer import AnomalyDetector
-    from markov_explorer import UniversalPredictor, PredictorForest
+    from uchi import TabularPredictor, TabularRegressor
+    from uchi import MultivariateTSPredictor, TimeSeriesClassifier
+    from uchi import AnomalyDetector
+    from uchi import UniversalPredictor, PredictorForest
 
 All classes are sklearn-compatible (Pipeline, GridSearchCV, cross_val_score).
 TabularPredictor / TabularRegressor / TimeSeriesClassifier all support

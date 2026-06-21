@@ -6,9 +6,9 @@ from sklearn.metrics import accuracy_score
 from datasets import load_gutenberg_text, load_electricity
 from sklearn.datasets import make_classification
 
-from markov_explorer.hoeffding import HoeffdingPredictor
-from markov_explorer.generative import SequenceGenerator
-from markov_explorer.distributional import DistributionalTokenizer
+from uchi.hoeffding import HoeffdingPredictor
+from uchi.generative import SequenceGenerator
+from uchi.distributional import DistributionalTokenizer
 from benchmark_baselines import NgramBaseline
 
 # Ensure T is the same across all tasks

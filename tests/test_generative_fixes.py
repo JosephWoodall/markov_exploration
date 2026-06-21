@@ -16,14 +16,14 @@ import time
 # ── project imports ──────────────────────────────────────────────────────────
 
 sys.path.insert(0, '.')
-from markov_explorer import (
+from uchi import (
     UniversalPredictor, SequenceGenerator, TabularGenerator,
     TimeSeriesGenerator, LongTermStore, DualPredictor,
     OnlineTokenizer, NodeCompressor,
 )
-from markov_explorer.predictor import _TrieNode
-from markov_explorer.tabular import _make_predictor
-from markov_explorer.generative import _train_autoregressive, _sample_dist
+from uchi.predictor import _TrieNode
+from uchi.tabular import _make_predictor
+from uchi.generative import _train_autoregressive, _sample_dist
 
 # ── shared helpers ───────────────────────────────────────────────────────────
 

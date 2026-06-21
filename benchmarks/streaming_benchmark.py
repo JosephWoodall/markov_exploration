@@ -2,7 +2,7 @@ import numpy as np
 import time
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
-from markov_explorer.hoeffding import HoeffdingPredictor
+from uchi.hoeffding import HoeffdingPredictor
 from sklearn.datasets import make_classification
 
 def run_streaming_benchmark():
