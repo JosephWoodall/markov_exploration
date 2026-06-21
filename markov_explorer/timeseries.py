@@ -31,9 +31,9 @@ try:
     from sklearn.base import BaseEstimator, ClassifierMixin, OutlierMixin
     _SKLEARN = True
 except ImportError:
-    BaseEstimator  = object
-    ClassifierMixin = object
-    OutlierMixin   = object
+    class BaseEstimator: pass
+    class ClassifierMixin: pass
+    class OutlierMixin: pass
     _SKLEARN = False
 
 _LABEL_NS_TS = '__ts_label__'

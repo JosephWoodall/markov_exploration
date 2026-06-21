@@ -18,8 +18,10 @@ from sklearn.metrics import accuracy_score, mean_squared_error
 import sys
 sys.path.insert(0, '.')
 from markov_explorer.tabular import TabularPredictor, TabularRegressor
+from markov_explorer.hoeffding import HoeffdingPredictor
 from markov_explorer.timeseries import MultivariateTSPredictor
 from markov_explorer.generative import SequenceGenerator
+from markov_explorer.distributional import DistributionalTokenizer
 from tests import _datasets
 
 # ── Baselines ────────────────────────────────────────────────────────────────
@@ -124,16 +126,26 @@ def benchmark_tabular_classification():
     rf_acc = accuracy_score(y_test, rf_preds)
     rf_time = time.time() - t0
     
-    # Markov Explorer: TabularPredictor
+    # Markov Explorer:    
+    # Markov Tabular (Hoeffding Tries)
     t0 = time.time()
-    mp = TabularPredictor(n_bins=5, context_length=6, n_orderings=4)
-    mp.fit(X_train.tolist(), y_train.tolist())
-    mp_preds = mp.predict(X_test.tolist())
-    mp_acc = accuracy_score(y_test, mp_preds)
+    mp_model = HoeffdingPredictor(n_features=X_train.shape[1], grace_period=50)
+    for row, label in zip(X_train.tolist(), y_train.tolist()):
+        mp_model.partial_fit(row, label)
+    
+    y_pred_mp = []
+    for row in X_test.tolist():
+        dist = mp_model.predict_proba(row)
+        if not dist:
+            y_pred_mp.append(0) # fallback
+        else:
+            y_pred_mp.append(max(dist, key=dist.get))
+            
+    mp_acc = accuracy_score(y_test, y_pred_mp)
     mp_time = time.time() - t0
     
     print(f"  RandomForest Acc : {rf_acc:.3f}  (Time: {rf_time:.3f}s)")
-    print(f"  Markov Tabular   : {mp_acc:.3f}  (Time: {mp_time:.3f}s)")
+    print(f"  Hoeffding Tries  : {mp_acc:.3f}  (Time: {mp_time:.3f}s)")
     
     if mp_acc > rf_acc:
         print("  ✓ Markov Explorer outperformed Baseline!")
@@ -213,9 +225,16 @@ def benchmark_generative():
         ng_bpt = ngram.score(test)
         ng_time = time.time() - t0
         
-        # Markov: SequenceGenerator
+        # Markov: SequenceGenerator (Infinite Context + Distributional Semantics)
         t0 = time.time()
-        sg = SequenceGenerator(context_length=ctx_len, use_online_tokenizer=True)
+        sg = SequenceGenerator(
+            context_length=None, 
+            use_online_tokenizer=True,
+            use_semantic_hashing=False,
+            use_skip_grams=False
+        )
+        # Manually plug in DistributionalTokenizer
+        sg.semantic_tokenizer = DistributionalTokenizer(merge_threshold_jsd=0.2)
         sg.fit(train)
         sg_bpt = sg.score(test)
         sg_time = time.time() - t0

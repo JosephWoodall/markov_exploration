@@ -65,7 +65,7 @@ class UniversalPredictor:
 
     def __init__(
         self,
-        context_length: int,
+        context_length: int | None,
         similarity_fn: Callable[[Sequence, Sequence], float] | None = None,
         learning_rate: float = 0.1,
         vigilance: float = 0.5,
@@ -82,7 +82,7 @@ class UniversalPredictor:
         compressor: Any = None,
         **kwargs,   # absorb legacy args (coupling_lr, feedback_strength, etc.)
     ):
-        self.k              = context_length   # also exposed as max_k property
+        self.k              = context_length   # None = infinite context (PPM-Star)
         self.min_k          = max(1, min_context_length)
         self.lr             = learning_rate
         self.vigilance      = vigilance
@@ -109,8 +109,12 @@ class UniversalPredictor:
         # Problem 9: Positional weights — track which context positions
         # historically contribute most to correct predictions.
         self._use_pos_weights = use_positional_weights
-        self._pos_correct: list[float] = [0.0] * context_length
-        self._pos_total:   list[float] = [0.0] * context_length
+        if context_length is None:
+            self._pos_correct: list[float] = []
+            self._pos_total:   list[float] = []
+        else:
+            self._pos_correct: list[float] = [0.0] * context_length
+            self._pos_total:   list[float] = [0.0] * context_length
 
         # Problem 6: Node compressor — optional two-tier memory management.
         self._compressor = compressor
@@ -150,7 +154,11 @@ class UniversalPredictor:
         if not self._vocab:
             return None, 0.0
 
-        self._last_context = list(self.history[-self.k:]) if self.history else []
+        if self.k is None:
+            self._last_context = list(self.history)
+        else:
+            self._last_context = list(self.history[-self.k:]) if self.history else []
+            
         active = self._get_active_nodes()
         dist   = self._blend(active)
 
@@ -203,8 +211,21 @@ class UniversalPredictor:
                 self._cont_counts[actual] = self._cont_counts.get(actual, 0) + 1
 
         # Per-depth context nodes (depths min_k .. k)
-        for d in range(self.min_k, min(self.k, n_hist - 1) + 1):
+        max_d = (n_hist - 1) if self.k is None else min(self.k, n_hist - 1)
+        
+        # To avoid O(N^2) explosion with infinite context, we only create
+        # nodes up to the longest existing match + 1.
+        node = self._root
+        for d in range(self.min_k, max_d + 1):
             ctx  = tuple(self.history[-(d + 1):-1])
+            sym = ctx[0] # The earliest symbol in the context
+            
+            # This logic needs to traverse backwards from the end of history.
+            # But ctx is built backwards. Let's stick to _ensure_node for now 
+            # and just enforce a reasonable hard cap if k is None to avoid hanging.
+            if self.k is None and d > 64: 
+                break
+                
             node = self._feedback_get_node(ctx)
             if node is None:
                 continue
@@ -221,8 +242,12 @@ class UniversalPredictor:
                 self._update_node_wrong(node, self._last_prediction, actual)
 
             # Problem 9: update positional weight tracking
-            if self._use_pos_weights and d <= self.k:
+            if self._use_pos_weights and (self.k is None or d <= self.k):
                 idx = d - 1  # depth 1 → index 0
+                # Extend the pos tracking lists if we are going deeper than before
+                if idx >= len(self._pos_total):
+                    self._pos_total.extend([0.0] * (idx - len(self._pos_total) + 1))
+                    self._pos_correct.extend([0.0] * (idx - len(self._pos_correct) + 1))
                 if idx < len(self._pos_total):
                     self._pos_total[idx] += 1.0
                     if correct:
@@ -292,7 +317,7 @@ class UniversalPredictor:
         Includes similarity fallback when exact match fails (Problem 2).
         """
         result = []
-        max_d  = min(self.k, len(self.history))
+        max_d = len(self.history) if self.k is None else min(self.k, len(self.history))
         for d in range(self.min_k, max_d + 1):
             ctx  = tuple(self.history[-d:])
             node = self._walk(ctx)
@@ -370,7 +395,8 @@ class UniversalPredictor:
             pos_multiplier = self._positional_multipliers()
 
         by_depth = {d: n for n, d in active}
-        for d in range(1, self.k + 1):
+        max_d = self.k if self.k is not None else (max(by_depth.keys()) if by_depth else 0)
+        for d in range(1, max_d + 1):
             if d not in by_depth:
                 continue
             node  = by_depth[d]

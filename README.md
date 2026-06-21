@@ -198,8 +198,25 @@ The three generators (`SequenceGenerator`, `TabularGenerator`, `TimeSeriesGenera
 9. **No selective gating.** All k sampled past tokens are weighted by credibility equally — the model cannot decide which parts of past context are relevant to the current prediction and suppress the rest. SSM-style selective state updates approximate this; credibility is a coarser proxy that operates at the node level, not the token level.
    *Fix:* Positional weight table — the predictor tracks for each of the k context positions how often a match at that position contributed to a correct prediction. Positions that historically helped more get more influence. Updated after every feedback step. Enabled via `use_positional_weights=True`.
 
-10. **No joint optimization of compression and prediction.** If a compression layer (BPE, VQ codebook, adaptive discretization) is added upstream to extend the effective receptive field, it is trained separately from the trie. Errors in the compression step compound into the prediction step. Neural architectures train both end-to-end via backprop, so the tokenizer learns to produce tokens that are maximally predictable, not just maximally compact. **Note:** solving limitations 1 and 8 via learned semantic compression and external memory converges on a small neural architecture from a different direction — at that point the question becomes whether to build toward that explicitly or treat the trie as a fast specialist for structured domains and delegate language tasks elsewhere.
-   *Fix:* `OnlineTokenizer` merge scoring — after each merge, prediction accuracy on the immediately following tokens is measured. Merges that hurt accuracy are penalized; merges that help are reinforced. Over many sequences the tokenizer learns which compressions are genuinely useful for prediction, not just compact.
+10. **No joint optimization of compression and prediction.** If a compression layer (BPE, VQ codebook, adaptive discretization) is added upstream to extend the effective receptive field, it is trained separately from the trie. Errors in the compression step compound into the prediction step. Neural architectures train both end-to-end via backprop, so the tokenizer learns to produce tokens that are maximally predictable, not just maximally compact.
+    *Fix:* `OnlineTokenizer` merge scoring — after each merge, prediction accuracy on the immediately following tokens is measured. Merges that hurt accuracy are penalized; merges that help are reinforced. Over many sequences the tokenizer learns which compressions are genuinely useful for prediction, not just compact.
+
+---
+
+## The "LLM/Random Forest Parity" Problem
+
+We recently attempted to close the gap with deep learning models (LLMs on sequences, Random Forests on Tabular) using purely statistical/symbolic methods, specifically aiming to capture deep semantic embeddings and complex global feature crosses *without* offline neural pre-training.
+
+**What we built:**
+1. **Experience Replay Buffers & Ensembles:** For Tabular data, we built a sliding-window Replay Buffer that trains over mini-batches of streaming rows, feeding them into a Random Forest of Tries (shuffled feature orderings).
+2. **Semantic Ontology Hashing:** We replaced exact string matches with abstract "Concept IDs" using WordNet (e.g., mapping "hound" to `dog.n.01`) to simulate LLM embeddings.
+3. **Variable-Order Skip-Grams:** We randomly dropped context tokens during trie training to simulate "Attention" and look past the strict $k$-gram window.
+
+**The Result:** Performance on strict literal benchmarks got *worse*. 
+- **Tabular:** While the Replay Buffer stabilized streaming gradients, the model still scored ~60% vs Random Forest's 93.5%. The reason is that statistical tries strictly partition data locally; they cannot perform the global, simultaneous Information Gain splits over the entire dataset that Random Forests do.
+- **Sequence (Bits/Token):** Bits-per-token skyrocketed from ~3.0 to 14.2 on Alice in Wonderland. Mapping raw words to abstract concepts destroys the exact literal spelling/grammar, and Skip-Grams inject noise that corrupts the trie's ability to memorize exact contiguous patterns.
+
+**The Current Goal:** We must ideate a *mathematical possibility* of achieving LLM/RF performance—capturing deep semantics and continuous non-linear bounds—strictly online, without massive offline pre-computation (no pre-trained neural embeddings).
 
 ---
 

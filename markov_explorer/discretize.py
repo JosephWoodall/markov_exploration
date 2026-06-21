@@ -57,6 +57,10 @@ class FeatureDiscretizer:
         self._edges:       dict = {}   # col → sorted list of quantile cut-points
         self._cat_maps:    dict = {}   # col → {value: int}
         self._bin_centers: dict = {}   # col → list of float centers (numeric only)
+        
+        # Reservoir sampling state for dynamic online splitting
+        self._reservoirs:  dict = {}   # col -> list of sampled float values
+        self._reservoir_max: int = 2000
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -74,6 +78,7 @@ class FeatureDiscretizer:
             col = [row[j] for row in X]
             if _is_numeric_col(col):
                 self._types.append('numeric')
+                self._reservoirs[j] = [float(v) for v in col if not _is_missing(v) and not (isinstance(v, float) and math.isnan(v))]
                 edges, centers = _quantile_edges(col, self.n_bins)
                 self._edges[j]       = edges
                 self._bin_centers[j] = centers
@@ -82,6 +87,51 @@ class FeatureDiscretizer:
                 unique = sorted(
                     {_safe_str(v) for v in col if not _is_missing(v)})
                 self._cat_maps[j] = {v: i for i, v in enumerate(unique)}
+        self._total_seen = len(X)
+        return self
+
+    def partial_fit(self, X) -> 'FeatureDiscretizer':
+        """
+        Online dynamic splitting: Update the reservoir sample of numeric columns
+        and re-calculate quantile bins if enough new data has arrived.
+        """
+        if self._n_features == 0:
+            return self.fit(X)
+            
+        rows = _to_rows(X)
+        if not rows:
+            return self
+            
+        import random
+        for row in rows:
+            self._total_seen += 1
+            for j in range(self._n_features):
+                v = row[j]
+                if self._types[j] == 'numeric':
+                    if _is_missing(v):
+                        continue
+                    v = float(v)
+                    # Reservoir sampling
+                    if len(self._reservoirs[j]) < self._reservoir_max:
+                        self._reservoirs[j].append(v)
+                    else:
+                        idx = random.randint(0, self._total_seen - 1)
+                        if idx < self._reservoir_max:
+                            self._reservoirs[j][idx] = v
+                else:
+                    # Categorical: dynamically add unseen categories
+                    if not _is_missing(v):
+                        s = _safe_str(v)
+                        if s not in self._cat_maps[j]:
+                            self._cat_maps[j][s] = len(self._cat_maps[j])
+                            
+        # Re-compute bins periodically (e.g., every time we process a batch)
+        for j in range(self._n_features):
+            if self._types[j] == 'numeric' and self._reservoirs[j]:
+                edges, centers = _quantile_edges(self._reservoirs[j], self.n_bins)
+                self._edges[j] = edges
+                self._bin_centers[j] = centers
+                
         return self
 
     def transform(self, X) -> list:

@@ -37,12 +37,15 @@ from typing import Any
 from .predictor  import UniversalPredictor
 from .discretize import FeatureDiscretizer, LabelEncoder, _to_rows
 from .tabular    import _make_predictor, _apply_order, _build_orders, _LABEL_NS
+from .long_term_store import LongTermStore
+from .online_tokenizer import OnlineTokenizer
+from .semantic_tokenizer import SemanticTokenizer
 
 try:
     from sklearn.base import BaseEstimator
     _SKLEARN = True
 except ImportError:
-    BaseEstimator = object
+    class BaseEstimator: pass
     _SKLEARN = False
 
 # Lazy imports for optional components
@@ -177,6 +180,7 @@ def _train_autoregressive(
     tokens: list,
     tokenizer=None,
     long_term_store=None,
+    use_skip_grams=False,
 ) -> None:
     """
     Train p on every consecutive token pair within a single sequence.
@@ -192,9 +196,20 @@ def _train_autoregressive(
     p.history.clear()
     correct = 0
     total = 0
-    for token in tokens:
+    import random
+    for i, token in enumerate(tokens):
         p.predict()
         pred = p._last_prediction
+        
+        # Simulated Skip-Gram attention: randomly drop one context token during training
+        if use_skip_grams and i > 2 and random.random() < 0.2:
+            saved = p.history[:]
+            idx_to_drop = random.randint(0, len(p.history) - 1)
+            p.history.pop(idx_to_drop)
+            p.observe(token)
+            p.feedback(token)
+            p.history = saved
+            
         p.observe(token)
         p.feedback(token)
         total += 1
@@ -262,6 +277,8 @@ class SequenceGenerator(BaseEstimator):
         long_term_store: Any  = None,
         use_similarity_fallback: bool = False,
         use_positional_weights: bool = False,
+        use_semantic_hashing: bool = False,
+        use_skip_grams: bool = False,
     ):
         self.context_length = context_length
         self.temperature    = temperature
@@ -271,17 +288,14 @@ class SequenceGenerator(BaseEstimator):
         self.cred_max       = cred_max
         self.lambda_power   = lambda_power
         self.random_seed    = random_seed
-        # Problem 1/10: OnlineTokenizer
         self.use_online_tokenizer = use_online_tokenizer
         self.tokenizer_max_merges = tokenizer_max_merges
-        # Problem 7: DualPredictor
         self.use_dual_predictor = use_dual_predictor
-        # Problem 3/5/8: LongTermStore
         self.long_term_store = long_term_store
-        # Problem 2: Similarity fallback
         self.use_similarity_fallback = use_similarity_fallback
-        # Problem 9: Positional weights
         self.use_positional_weights = use_positional_weights
+        self.use_semantic_hashing = use_semantic_hashing
+        self.use_skip_grams = use_skip_grams
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -308,6 +322,7 @@ class SequenceGenerator(BaseEstimator):
         if self.use_online_tokenizer:
             OT = _get_online_tokenizer()
             self._tokenizer = OT(max_merges=self.tokenizer_max_merges)
+        self.semantic_tokenizer = SemanticTokenizer() if self.use_semantic_hashing else None
         self.is_fitted_ = True
         self._train_sequences(sequences)
         return self
@@ -388,6 +403,10 @@ class SequenceGenerator(BaseEstimator):
         tokens = list(sequence)
         if not tokens:
             return float('inf')
+
+        if self.semantic_tokenizer:
+            tokens = [self.semantic_tokenizer.tokenize(t) for t in tokens]
+        
         saved  = self._pred.history[:]
         total  = 0.0
         for token in tokens:
@@ -409,13 +428,13 @@ class SequenceGenerator(BaseEstimator):
         tok = getattr(self, '_tokenizer', None)
         lts = self.long_term_store
         if isinstance(sequences, str):
-            _train_autoregressive(self._pred, list(sequences), tokenizer=tok, long_term_store=lts)
+            _train_autoregressive(self._pred, list(sequences), tokenizer=tok, long_term_store=lts, use_skip_grams=self.use_skip_grams)
         elif sequences and not isinstance(sequences[0], (list, tuple)):
             # Flat list — treat as one sequence
-            _train_autoregressive(self._pred, list(sequences), tokenizer=tok, long_term_store=lts)
+            _train_autoregressive(self._pred, list(sequences), tokenizer=tok, long_term_store=lts, use_skip_grams=self.use_skip_grams)
         else:
             for seq in sequences:
-                _train_autoregressive(self._pred, list(seq), tokenizer=tok, long_term_store=lts)
+                _train_autoregressive(self._pred, list(seq), tokenizer=tok, long_term_store=lts, use_skip_grams=self.use_skip_grams)
 
     def _check_fitted(self):
         if not hasattr(self, '_pred'):

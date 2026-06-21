@@ -36,9 +36,9 @@ try:
     from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
     _SKLEARN = True
 except ImportError:
-    BaseEstimator = object
-    ClassifierMixin = object
-    RegressorMixin = object
+    class BaseEstimator: pass
+    class ClassifierMixin: pass
+    class RegressorMixin: pass
     _SKLEARN = False
 
 _LABEL_NS  = '__label__'
@@ -168,6 +168,8 @@ class TabularPredictor(BaseEstimator, ClassifierMixin):
         self.cred_max       = cred_max
         self.lambda_power   = lambda_power
         self.random_seed    = random_seed
+        self._replay_buffer = []
+        self._replay_batch_size = 100
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -201,11 +203,27 @@ class TabularPredictor(BaseEstimator, ClassifierMixin):
     def partial_fit(self, X, y, classes=None) -> 'TabularPredictor':
         if not hasattr(self, '_disc'):
             return self.fit(X, y)
+        self._disc.partial_fit(X)
         rows   = self._disc.transform(X)
         labels = list(y)
         self._lenc.partial_fit(labels)
+        
+        # Experience Replay Buffer Logic
         for tok_row, label in zip(rows, labels):
-            self._train_row(tok_row, label)
+            self._replay_buffer.append((tok_row, label))
+            
+            if len(self._replay_buffer) >= self._replay_batch_size:
+                # Train on the buffer multiple times to stabilize
+                for _ in range(self.n_epochs):
+                    buffer_copy = self._replay_buffer[:]
+                    self._rng.shuffle(buffer_copy)
+                    for r, l in buffer_copy:
+                        self._train_row(r, l)
+                        
+                # Keep the last 20% to mix with incoming data (sliding window overlap)
+                keep = int(self._replay_batch_size * 0.2)
+                self._replay_buffer = self._replay_buffer[-keep:]
+                
         return self
 
     def predict(self, X) -> list:
