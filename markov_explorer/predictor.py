@@ -317,7 +317,7 @@ class UniversalPredictor:
         Includes similarity fallback when exact match fails (Problem 2).
         """
         result = []
-        max_d = len(self.history) if self.k is None else min(self.k, len(self.history))
+        max_d = min(64, len(self.history)) if self.k is None else min(self.k, len(self.history))
         for d in range(self.min_k, max_d + 1):
             ctx  = tuple(self.history[-d:])
             node = self._walk(ctx)

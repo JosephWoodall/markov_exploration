@@ -97,13 +97,9 @@ class DistributionalTokenizer:
                 
             self.clusters[target_token] = c_id
 
-    def tokenize(self, sequence: list) -> list:
-        """Tokenize a sequence and update distributions online."""
-        out = []
-        for tok in sequence:
-            self.observe(tok)
-            if tok in self.clusters:
-                out.append(self.clusters[tok])
-            else:
-                out.append(tok)
-        return out
+    def tokenize(self, token: Any) -> Any:
+        """Tokenize a single token and update distributions online."""
+        self.observe(token)
+        if token in self.clusters:
+            return self.clusters[token]
+        return token
