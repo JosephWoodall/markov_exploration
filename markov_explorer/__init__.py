@@ -1,0 +1,46 @@
+"""
+markov_explorer
+===============
+Online credibility-weighted sequence predictor for tabular, time series,
+and generative machine learning tasks.
+
+Quick start
+-----------
+    from markov_explorer import TabularPredictor, TabularRegressor
+    from markov_explorer import MultivariateTSPredictor, TimeSeriesClassifier
+    from markov_explorer import AnomalyDetector
+    from markov_explorer import UniversalPredictor, PredictorForest
+
+All classes are sklearn-compatible (Pipeline, GridSearchCV, cross_val_score).
+TabularPredictor / TabularRegressor / TimeSeriesClassifier all support
+partial_fit() for online / incremental learning.
+"""
+
+from .predictor  import UniversalPredictor
+from .forest     import PredictorForest
+from .discretize import FeatureDiscretizer, LabelEncoder
+from .tabular    import TabularPredictor, TabularRegressor
+from .timeseries import MultivariateTSPredictor, TimeSeriesClassifier, AnomalyDetector
+from .generative import SequenceGenerator, TabularGenerator, TimeSeriesGenerator
+
+__version__ = "0.1.0"
+
+__all__ = [
+    # Core engine
+    "UniversalPredictor",
+    "PredictorForest",
+    # Feature engineering
+    "FeatureDiscretizer",
+    "LabelEncoder",
+    # Tabular ML
+    "TabularPredictor",
+    "TabularRegressor",
+    # Time series
+    "MultivariateTSPredictor",
+    "TimeSeriesClassifier",
+    "AnomalyDetector",
+    # Generative
+    "SequenceGenerator",
+    "TabularGenerator",
+    "TimeSeriesGenerator",
+]
